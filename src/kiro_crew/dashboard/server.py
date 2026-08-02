@@ -1846,6 +1846,10 @@ async def start_dashboard(
     # and the task is cancelled by the service's shutdown hook.
     app["kiro_prerequisite_service"].warm_up()
     state.load_folders()
+    # One-shot lazy migration: chat folders still carrying a legacy emoji icon
+    # get a curated lucide icon regenerated in the background (self-healing —
+    # a failed generation retries on the next boot).
+    chat.migrate_emoji_folder_icons(state)
     state.load_tags()
     app["port"] = port
 
@@ -3248,6 +3252,8 @@ async def start_api_server(
     # and the task is cancelled by the service's shutdown hook.
     app["kiro_prerequisite_service"].warm_up()
     state.load_folders()
+    # Same legacy-emoji icon migration as start_dashboard.
+    chat.migrate_emoji_folder_icons(state)
     state.load_tags()
     app["port"] = port
 
