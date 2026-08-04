@@ -12,9 +12,15 @@ python3 plus git/gh are available.
 Usage:  python3 preflight.py
 Exit:   0 READY | 30 BLOCKER (see printed reason) | 2 environment error
 """
+
 import json
+import os
 import subprocess
 import sys
+
+# Import the shared threshold constant from the sibling push_guard script.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from push_guard import DEFAULT_MAX_AHEAD  # noqa: E402
 
 
 def run(args):
@@ -69,20 +75,26 @@ def main():
     on_protected = cur == base
     dirty = bool(run(["git", "status", "--porcelain"])[1])
 
-    # Divergence vs base (non-destructive fetch).
+    # Divergence vs base (non-destructive fetch).  The fetch MUST succeed —
+    # without a fresh origin/<base> ref every subsequent merge-base/rebase
+    # operates on a potentially stale local copy (root cause of the 2026-07-31
+    # clobber incident where a force-push carried 114 duplicate commits).
     behind = ahead = "?"
-    run(["git", "fetch", "--quiet", "origin", base])
-    rc, out, _ = run(
-        ["git", "rev-list", "--left-right", "--count", "origin/{}...HEAD".format(base)]
-    )
-    if rc == 0 and len(out.split()) == 2:
-        behind, ahead = out.split()
+    fetch_rc, _, fetch_err = run(["git", "fetch", "--quiet", "origin", base])
+    fetch_ok = fetch_rc == 0
+    if fetch_ok:
+        rc, out, _ = run(
+            ["git", "rev-list", "--left-right", "--count", "origin/{}...HEAD".format(base)]
+        )
+        if rc == 0 and len(out.split()) == 2:
+            behind, ahead = out.split()
 
     print("repo:            " + root)
     print("current branch:  " + cur)
     print("base branch:     " + base + ("  (from PR)" if pr_base else ""))
     print("on protected:    " + ("yes" if on_protected else "no"))
     print("working tree:    " + ("dirty" if dirty else "clean"))
+    print("fetch origin:    " + ("ok" if fetch_ok else "FAILED"))
     print("vs origin/{}:  behind={} ahead={}".format(base, behind, ahead))
     print("gh authed:       " + ("yes" if gh_ok else "no"))
     print("existing PR:     " + (pr_num or "none") + (("  (" + pr_url + ")") if pr_url else ""))
@@ -103,6 +115,31 @@ def main():
     if not gh_ok:
         print("BLOCKER: gh not authenticated - run: gh auth login")
         blocked = True
+    if not fetch_ok:
+        print(
+            "BLOCKER: git fetch origin {} failed — cannot verify branch "
+            "freshness against the remote base. Rebase/push on a stale ref "
+            "risks clobbering upstream work. Fix network/auth and retry.".format(base)
+        )
+        if fetch_err:
+            print("  fetch error: " + fetch_err[:200])
+        blocked = True
+    # Stale-base guard: if the branch is implausibly far ahead of origin/<base>
+    # (more than DEFAULT_MAX_AHEAD commits for a single-commit PR workflow),
+    # warn loudly.  This catches worktrees that were branched from a local
+    # trunk carrying unshipped integration commits (root cause of the
+    # 2026-07-31 clobber).  The threshold is generous — a normal prepare-pr
+    # squashes to 1 commit; DEFAULT_MAX_AHEAD allows for multi-commit profiles
+    # or a small rebase stack.
+    if ahead != "?" and int(ahead) > DEFAULT_MAX_AHEAD:
+        print(
+            "WARNING: branch is {} commits ahead of origin/{} — this is "
+            "unusually high for a single-commit PR. If this branch was created "
+            "from a local integration trunk, those extra commits will be "
+            "replayed on rebase and force-pushed to the remote, potentially "
+            "clobbering upstream work. Verify the branch history before "
+            "proceeding.".format(ahead, base)
+        )
     if blocked:
         return 30
 

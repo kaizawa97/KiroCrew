@@ -65,6 +65,10 @@ _EXCLUDED_SUBTREES: tuple[str, ...] = (
     # Fork-only artifact-deploy reaper Lambda payload; boto3/botocore come
     # from the AWS Lambda runtime, not core startup imports.
     "deploy/skills/",
+    # Builtin skill scripts are standalone CLI tools with sibling imports
+    # (e.g. preflight.py imports push_guard.py via sys.path); they are not
+    # core startup code and have no bearing on pip install requirements.
+    "builtin_skills/",
 )
 
 
