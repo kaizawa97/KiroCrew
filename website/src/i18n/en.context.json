@@ -25,6 +25,7 @@
     "apps.issueRadar.views.tagging.untaggedIssueCard.add": "Verb on a button: add an entry to the list beside it. If the target language needs an object, name the thing being added.",
     "apps.meetings.priority.low": "Priority level of a meeting action item, the lowest of high/medium/low. An adjective describing importance, not volume or position.",
     "apps.meetings.settings.addTerm": "Verb on a button: add a term to the meeting dictionary (the vocabulary list that improves transcription accuracy). If the target language needs an object, \"add a term\" is the sense.",
+    "apps.meetings.settings.translationOff": "The first option in the Meetings live-translation target-language PICKER, sitting above a list of language endonyms (English, 日本語, …) and meaning \"do not translate\". A choice in a dropdown, not a toggle's state label and not the preposition — several languages need a different word here than for an off switch.",
     "apps.meetings.taskSidebar.add": "Verb on a button: add an entry to the list beside it. If the target language needs an object, name the thing being added.",
     "apps.papyrus.page.pdf": "The file format \"PDF\", labelling the compiled output of a LaTeX paper. An acronym practitioners keep untranslated in nearly every locale.",
     "apps.papyrus.workspace.log": "Noun: the LaTeX compiler's output log, naming a tab beside the PDF preview. A record of what the compiler printed — NOT the verb \"to log\" and not a logarithm.",

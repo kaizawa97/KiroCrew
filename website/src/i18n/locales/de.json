@@ -1286,7 +1286,8 @@
         "start": "Starten",
         "stopRecording": "Aufzeichnung beenden",
         "toggleTasks": "Aufgaben",
-        "unpause": "Fortsetzen"
+        "unpause": "Fortsetzen",
+        "toggleTranslation": "Übersetzung"
       },
       "pillBar": {
         "addLink": "Link hinzufügen",
@@ -1398,7 +1399,10 @@
         "taskProviderTitle": "Aufgabenanbieter",
         "termFailed": "Diese Korrektur konnte nicht hinzugefügt werden.",
         "termIncomplete": "Gib ein, was gehört wurde und was es heißen soll.",
-        "title": "Besprechungseinstellungen"
+        "title": "Besprechungseinstellungen",
+        "translationTitle": "Live-Übersetzung",
+        "translationHelp": "Übersetzt jede gesprochene Zeile in eine andere Sprache und zeigt sie während des Meetings in einem Seitenbereich an. Kostet einen Modellaufruf pro Zeile und ist daher standardmäßig deaktiviert.",
+        "translationOff": "Aus"
       },
       "taskSidebar": {
         "add": "Hinzufügen",
@@ -1419,6 +1423,16 @@
         "chat": "Chat",
         "html": "Diagramm",
         "markdown": "Notizen"
+      },
+      "translation": {
+        "title": "Übersetzung",
+        "close": "Übersetzung schließen",
+        "empty": "Noch nichts übersetzt",
+        "emptyHint": "Zeilen erscheinen hier, sobald gesprochen wird.",
+        "loading": "Wird geladen…",
+        "lineFailed": "Diese Zeile konnte nicht übersetzt werden.",
+        "pending": "Wird aufgeholt…",
+        "dropped": "Einige Zeilen wurden übersprungen, um mitzuhalten."
       }
     },
     "papyrus": {

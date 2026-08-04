@@ -7,7 +7,7 @@
 
 import { useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { ArrowLeft, ArrowRight, CalendarClock, ListChecks, Plus, Trash2 } from 'lucide-react'
+import { ArrowLeft, ArrowRight, CalendarClock, Languages, ListChecks, Plus, Trash2 } from 'lucide-react'
 
 import { i18nT } from '../../i18n/t'
 import {
@@ -50,6 +50,7 @@ export default function SettingsView({ onBack, notify }: Props) {
   const config = configQuery.data?.config
   const calendarProviders = configQuery.data?.calendar_providers ?? []
   const taskProviders = configQuery.data?.task_providers ?? []
+  const translationLanguages = configQuery.data?.translation_languages ?? []
   const terms = dictionaryQuery.data?.terms ?? []
 
   const saveConfig = useMutation({
@@ -186,6 +187,30 @@ export default function SettingsView({ onBack, notify }: Props) {
           </Select>
         </Card>
 
+        <Card>
+          <CardTitle>
+            <Languages className="lucide-inline" />
+            {i18nT('apps.meetings.settings.translationTitle')}
+          </CardTitle>
+          <p className="text-[13px] text-muted mb-3">
+            {i18nT('apps.meetings.settings.translationHelp')}
+          </p>
+          <Select
+            value={config?.translation_language ?? ''}
+            aria-label={i18nT('apps.meetings.settings.translationTitle')}
+            onChange={e => patch({ translation_language: e.target.value })}
+          >
+            {/* "Off" is the default and the only translated entry here — every other
+                option is a language's own endonym, which is exactly what a reader
+                looking for that language will recognise. */}
+            <option value="">{i18nT('apps.meetings.settings.translationOff')}</option>
+            {translationLanguages.map(row => (
+              <option key={row.id} value={row.id}>
+                {row.label}
+              </option>
+            ))}
+          </Select>
+        </Card>
         <Card>
           <CardTitle>
             <CalendarClock className="lucide-inline" />

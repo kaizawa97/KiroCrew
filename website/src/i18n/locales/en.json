@@ -901,7 +901,8 @@
         "start": "Start",
         "stopRecording": "Stop recording",
         "toggleTasks": "Action items",
-        "unpause": "Resume"
+        "unpause": "Resume",
+        "toggleTranslation": "Translation"
       },
       "pillBar": {
         "addLink": "Add a link",
@@ -1013,7 +1014,10 @@
         "taskProviderTitle": "Task provider",
         "termFailed": "Could not add that correction.",
         "termIncomplete": "Enter what was heard and what it should say.",
-        "title": "Meetings settings"
+        "title": "Meetings settings",
+        "translationTitle": "Live translation",
+        "translationHelp": "Translate each spoken line into another language, shown in a side panel during the meeting. Costs one model call per line, so it is off by default.",
+        "translationOff": "Off"
       },
       "taskSidebar": {
         "add": "Add",
@@ -1034,6 +1038,16 @@
         "chat": "Chat",
         "html": "Diagram",
         "markdown": "Notes"
+      },
+      "translation": {
+        "title": "Translation",
+        "close": "Close translation",
+        "empty": "Nothing translated yet",
+        "emptyHint": "Lines appear here as they are spoken.",
+        "loading": "Loading…",
+        "lineFailed": "Could not translate this line.",
+        "pending": "Catching up…",
+        "dropped": "Some lines were skipped to keep up."
       }
     },
     "papyrus": {

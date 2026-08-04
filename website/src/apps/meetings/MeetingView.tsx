@@ -8,6 +8,7 @@ import {
   ArrowLeft,
   CircleDot,
   CircleStop,
+  Languages,
   ListChecks,
   Mic,
   MicOff,
@@ -25,6 +26,7 @@ import AgentPillBar from './components/AgentPillBar'
 import BroadcastBar from './components/BroadcastBar'
 import RecordingMeter from './components/RecordingMeter'
 import TaskSidebar from './components/TaskSidebar'
+import TranslationSidebar from './components/TranslationSidebar'
 import TaskReviewView from './TaskReviewView'
 import { useMeetingSession } from './hooks/useMeetingSession'
 
@@ -69,6 +71,7 @@ export default function MeetingView({
     pending,
     recording,
     systemAudio,
+    translation,
   } = session
 
   if (loading) return <Skeleton className="h-40 m-6" />
@@ -225,6 +228,19 @@ export default function MeetingView({
             >
               <RefreshCw className={`lucide-inline ${syncing ? 'animate-spin' : ''}`} />
             </Btn>
+            {/* Offered only when a target language is configured: with translation
+                off (the default) the button would open a panel that can never fill.
+                Settings is where it gets turned on. */}
+            {translation.language && (
+              <Btn
+                onClick={() => session.setTranslationOpen(open => !open)}
+                aria-label={i18nT('apps.meetings.meeting.toggleTranslation')}
+                title={i18nT('apps.meetings.meeting.toggleTranslation')}
+                aria-pressed={translation.open}
+              >
+                <Languages className="lucide-inline" />
+              </Btn>
+            )}
             <Btn
               onClick={() => setSidebarOpen(open => !open)}
               aria-label={i18nT('apps.meetings.meeting.toggleTasks')}
@@ -304,6 +320,17 @@ export default function MeetingView({
           <BroadcastBar onSend={actions.broadcast} caption={caption} />
         )}
       </div>
+
+      {translation.open && translation.language && (
+        <TranslationSidebar
+          lines={translation.lines}
+          languageLabel={translation.languageLabel}
+          pending={translation.pending}
+          dropped={translation.dropped}
+          loading={translation.loading}
+          onClose={() => session.setTranslationOpen(false)}
+        />
+      )}
 
       {sidebarOpen && (
         <TaskSidebar

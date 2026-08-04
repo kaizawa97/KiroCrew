@@ -19,6 +19,7 @@ import {
   type MeetingStatus,
   type MeetingsConfig,
   type Task,
+  type TranslationLine,
 } from '../api'
 import type { SystemAudioFailure } from '../audio/systemAudio'
 import { useMeetingRecording, type RecordingErrorCode } from './useMeetingRecording'
@@ -164,6 +165,7 @@ export function useMeetingSession({ eventId, fallbackTitle, config, notify }: Op
   const scope = ['meetings', meetingId] as const
 
   const [caption, setCaption] = useState('')
+  const [translationOpen, setTranslationOpen] = useState(false)
   const [chatViewAgents, setChatViewAgents] = useState<string[]>([])
   const [selectedPreset, setSelectedPreset] = useState(config?.default_preset ?? '')
   // `useState` captures its initial value ONCE, and `config` arrives from a query —
@@ -216,6 +218,56 @@ export function useMeetingSession({ eventId, fallbackTitle, config, notify }: Op
       : status === 'paused' || status === 'reviewing'
         ? (config?.poll_interval_idle ?? 30_000)
         : false,
+  })
+
+  // ── live translation ──────────────────────────────────────────────────────
+  //
+  // Polled incrementally: the endpoint takes a `since` cursor and returns only
+  // newer lines, so a long meeting does not resend its whole transcript every few
+  // seconds. Accumulation therefore happens HERE rather than in the response.
+  //
+  // A Map keyed by line number, not an array: `queryFn` appending would otherwise
+  // duplicate every line if it ran twice for one cursor (React Strict Mode's
+  // double-invoke in development does exactly that). Keying by `n` makes the merge
+  // idempotent whatever the caller does.
+  const translationLinesRef = useRef(new Map<number, TranslationLine>())
+  const translationCursorRef = useRef(0)
+  const translationLanguage = config?.translation_language ?? ''
+
+  // Reset when the target language changes: the backend starts a fresh document,
+  // so keeping lines from the previous language would show a mix with no way to
+  // tell which line is in which.
+  const lastTranslationLanguageRef = useRef(translationLanguage)
+  if (lastTranslationLanguageRef.current !== translationLanguage) {
+    lastTranslationLanguageRef.current = translationLanguage
+    translationLinesRef.current = new Map()
+    translationCursorRef.current = 0
+  }
+
+  const translationQuery = useQuery({
+    queryKey: [...scope, 'translations'],
+    queryFn: async () => {
+      const page = await meetingsApi.translations(meetingId, translationCursorRef.current)
+      // A language switch observed from the server also resets: the document was
+      // replaced under us, so the cursor no longer refers to the same sequence.
+      if (page.language !== lastTranslationLanguageRef.current) {
+        translationLinesRef.current = new Map()
+      }
+      for (const line of page.lines) translationLinesRef.current.set(line.n, line)
+      translationCursorRef.current = page.next_n
+      return {
+        lines: [...translationLinesRef.current.values()].sort((a, b) => a.n - b.n),
+        pending: page.pending,
+        dropped: page.dropped,
+        language: page.language,
+        languageLabel: page.language_label,
+      }
+    },
+    // Only while the panel is OPEN and a language is configured. Translation is
+    // off by default, and polling for a feature nobody enabled would be pure waste.
+    enabled: initQuery.isSuccess && translationOpen && Boolean(translationLanguage),
+    refetchInterval: () =>
+      status === 'active' ? (config?.poll_interval_active ?? 5000) : false,
   })
 
   const agents = config?.meeting_agents ?? []
@@ -554,6 +606,18 @@ export function useMeetingSession({ eventId, fallbackTitle, config, notify }: Op
     recording,
     /** True while display-capture audio is mixed into the transcript and the recording. */
     systemAudio: transcription.systemAudio,
+    /** Live translation: `''` language means the feature is off. */
+    translation: {
+      language: translationLanguage,
+      /** Endonym from the server; falls back to the code until the first poll lands. */
+      languageLabel: translationQuery.data?.languageLabel || translationLanguage,
+      open: translationOpen,
+      lines: translationQuery.data?.lines ?? [],
+      pending: translationQuery.data?.pending ?? 0,
+      dropped: translationQuery.data?.dropped ?? 0,
+      loading: translationQuery.isFetching && translationQuery.data === undefined,
+    },
+    setTranslationOpen,
     loading: initQuery.isLoading || metaQuery.isLoading,
     error: (initQuery.error ?? metaQuery.error) as Error | null,
     agentsPaused: Boolean(live?.agents_paused),

@@ -1193,7 +1193,8 @@
         "start": "开始",
         "stopRecording": "停止录制",
         "toggleTasks": "行动项",
-        "unpause": "继续"
+        "unpause": "继续",
+        "toggleTranslation": "翻译"
       },
       "pillBar": {
         "addLink": "添加链接",
@@ -1303,7 +1304,10 @@
         "taskProviderTitle": "任务提供方",
         "termFailed": "无法添加该纠正条目。",
         "termIncomplete": "请填写听到的内容和应该写成什么。",
-        "title": "会议设置"
+        "title": "会议设置",
+        "translationTitle": "实时翻译",
+        "translationHelp": "将每句发言翻译成另一种语言，并在会议期间显示在侧边栏中。每句会消耗一次模型调用，因此默认关闭。",
+        "translationOff": "关闭"
       },
       "taskSidebar": {
         "add": "添加",
@@ -1323,6 +1327,16 @@
         "chat": "对话",
         "html": "图示",
         "markdown": "笔记"
+      },
+      "translation": {
+        "title": "翻译",
+        "close": "关闭翻译",
+        "empty": "尚无翻译内容",
+        "emptyHint": "发言时，译文会出现在这里。",
+        "loading": "加载中…",
+        "lineFailed": "无法翻译这一行。",
+        "pending": "正在追赶…",
+        "dropped": "为了跟上进度，已跳过部分内容。"
       }
     },
     "papyrus": {

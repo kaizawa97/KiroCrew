@@ -1221,7 +1221,8 @@
         "start": "Empezar",
         "stopRecording": "Detener la grabación",
         "toggleTasks": "Tareas",
-        "unpause": "Reanudar"
+        "unpause": "Reanudar",
+        "toggleTranslation": "Traducción"
       },
       "pillBar": {
         "addLink": "Añadir un enlace",
@@ -1335,7 +1336,10 @@
         "taskProviderTitle": "Proveedor de tareas",
         "termFailed": "No se pudo añadir esa corrección.",
         "termIncomplete": "Escribe lo que se oyó y lo que debería decir.",
-        "title": "Ajustes de Reuniones"
+        "title": "Ajustes de Reuniones",
+        "translationTitle": "Traducción en vivo",
+        "translationHelp": "Traduce cada línea hablada a otro idioma y la muestra en un panel lateral durante la reunión. Consume una llamada al modelo por línea, así que está desactivada de forma predeterminada.",
+        "translationOff": "Desactivada"
       },
       "taskSidebar": {
         "add": "Añadir",
@@ -1357,6 +1361,16 @@
         "chat": "Chat",
         "html": "Diagrama",
         "markdown": "Notas"
+      },
+      "translation": {
+        "title": "Traducción",
+        "close": "Cerrar la traducción",
+        "empty": "Aún no hay nada traducido",
+        "emptyHint": "Las líneas aparecen aquí a medida que se habla.",
+        "loading": "Cargando…",
+        "lineFailed": "No se pudo traducir esta línea.",
+        "pending": "Poniéndose al día…",
+        "dropped": "Se omitieron algunas líneas para no quedarse atrás."
       }
     },
     "papyrus": {

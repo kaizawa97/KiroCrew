@@ -1303,7 +1303,8 @@
         "start": "Démarrer",
         "stopRecording": "Arrêter l'enregistrement",
         "toggleTasks": "Actions à suivre",
-        "unpause": "Reprendre"
+        "unpause": "Reprendre",
+        "toggleTranslation": "Traduction"
       },
       "pillBar": {
         "addLink": "Ajouter un lien",
@@ -1417,7 +1418,10 @@
         "taskProviderTitle": "Fournisseur de tâches",
         "termFailed": "Impossible d’ajouter cette correction.",
         "termIncomplete": "Saisissez ce qui a été entendu et ce qu’il faudrait lire.",
-        "title": "Réglages des réunions"
+        "title": "Réglages des réunions",
+        "translationTitle": "Traduction en direct",
+        "translationHelp": "Traduit chaque ligne prononcée dans une autre langue, affichée dans un panneau latéral pendant la réunion. Consomme un appel au modèle par ligne, elle est donc désactivée par défaut.",
+        "translationOff": "Désactivée"
       },
       "taskSidebar": {
         "add": "Ajouter",
@@ -1439,6 +1443,16 @@
         "chat": "Discussion",
         "html": "Schéma",
         "markdown": "Notes"
+      },
+      "translation": {
+        "title": "Traduction",
+        "close": "Fermer la traduction",
+        "empty": "Rien de traduit pour l'instant",
+        "emptyHint": "Les lignes apparaissent ici au fil de la conversation.",
+        "loading": "Chargement…",
+        "lineFailed": "Impossible de traduire cette ligne.",
+        "pending": "Rattrapage en cours…",
+        "dropped": "Certaines lignes ont été ignorées pour suivre le rythme."
       }
     },
     "papyrus": {
