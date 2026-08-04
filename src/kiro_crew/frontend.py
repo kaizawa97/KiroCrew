@@ -20,6 +20,8 @@ import subprocess
 from pathlib import Path
 from typing import Callable, Optional
 
+from kiro_crew import platform_compat
+
 logger = logging.getLogger(__name__)
 
 # The frontend is in-tree at ``<repo-root>/website``; there is no remote to
@@ -159,13 +161,20 @@ def ensure_dev_dist_symlink() -> Optional[Path]:
 
     1. Existing real directory with ``index.html`` → no-op (packaged install /
        a prior local build that populated the source tree / manual setup).
-    2. Existing symlink → validated; dangling or empty targets get replaced.
+    2. Existing directory link → validated; dangling or empty targets get
+       replaced.
     3. Missing → resolve the in-tree ``website/dist`` (or a sibling
-       ``KiroCrewWebsite`` checkout as a last resort) and symlink to it.
+       ``KiroCrewWebsite`` checkout as a last resort) and link to it.
 
-    Symlink over copy: no source-tree churn, ``.gitignore`` already excludes
+    Link over copy: no source-tree churn, ``.gitignore`` already excludes
     ``static/dist/``, and a fresh ``website`` rebuild propagates to the gateway
     with no extra step.
+
+    The link is a symlink on POSIX and a directory JUNCTION on Windows
+    (``platform_compat.symlink_dir``): a Windows symlink needs
+    ``SeCreateSymbolicLinkPrivilege``, which an ordinary account lacks, so a raw
+    ``symlink_to`` here left every non-elevated Windows source install serving
+    the "not built" guidance page even with a built ``website/dist`` on disk.
 
     Returns the resolved dist path on success, ``None`` if nothing could be
     found (caller should warn; the gateway then serves the "not built"
@@ -173,18 +182,22 @@ def ensure_dev_dist_symlink() -> Optional[Path]:
     """
     kiro_crew_pkg_dir = Path(__file__).resolve().parent
     tree_dist = kiro_crew_pkg_dir / "static" / "dist"
+    # is_dir_link, not is_symlink: a junction is a directory link that
+    # is_symlink() reports as False, so every branch below has to ask the
+    # platform-aware question or it treats our own link as a real directory.
+    is_link = platform_compat.is_dir_link(tree_dist)
 
     # Case 1: real directory already populated (packaged install / a prior
     # local build landing in the source tree / user ran kirocrew init --ui).
-    if tree_dist.is_dir() and not tree_dist.is_symlink():
+    if tree_dist.is_dir() and not is_link:
         if (tree_dist / "index.html").is_file():
             return tree_dist
         # Empty real dir — fall through and try to resolve something usable.
 
-    # Case 2: existing symlink — validate and re-use if the target still has
+    # Case 2: existing link — validate and re-use if the target still has
     # a dist in it. A dangling or empty target means the website build moved
     # or was cleaned; drop the link and re-resolve below.
-    if tree_dist.is_symlink():
+    if is_link:
         try:
             target = tree_dist.resolve(strict=True)
         except (FileNotFoundError, OSError):
@@ -192,10 +205,11 @@ def ensure_dev_dist_symlink() -> Optional[Path]:
         if target is not None and (target / "index.html").is_file():
             return target
         try:
-            tree_dist.unlink()
+            platform_compat.unlink_dir_link(tree_dist)
         except OSError as exc:
-            logger.warning("Failed to remove stale dist symlink %s: %s", tree_dist, exc)
+            logger.warning("Failed to remove stale dist link %s: %s", tree_dist, exc)
             return None
+        is_link = False
 
     # Case 3: no usable dist in place — probe and link.
     candidate = _resolve_website_dist(kiro_crew_pkg_dir)
@@ -204,19 +218,19 @@ def ensure_dev_dist_symlink() -> Optional[Path]:
 
     tree_dist.parent.mkdir(parents=True, exist_ok=True)
     # Guard against a lingering empty real dir from Case 1's fall-through.
-    if tree_dist.exists() or tree_dist.is_symlink():
+    if tree_dist.exists() or is_link:
         try:
-            if tree_dist.is_dir() and not tree_dist.is_symlink():
+            if tree_dist.is_dir() and not is_link:
                 shutil.rmtree(tree_dist)
             else:
-                tree_dist.unlink()
+                platform_compat.unlink_dir_link(tree_dist)
         except OSError as exc:
-            logger.warning("Failed to clear %s before symlink: %s", tree_dist, exc)
+            logger.warning("Failed to clear %s before linking: %s", tree_dist, exc)
             return None
     try:
-        tree_dist.symlink_to(candidate)
+        platform_compat.symlink_dir(candidate, tree_dist)
     except OSError as exc:
-        logger.warning("Failed to symlink %s -> %s: %s", tree_dist, candidate, exc)
+        logger.warning("Failed to link %s -> %s: %s", tree_dist, candidate, exc)
         return None
     logger.info("Linked frontend dist: %s -> %s", tree_dist, candidate)
     return candidate
@@ -229,18 +243,23 @@ def _stage_dist(
 ) -> None:
     """Copy the freshly built ``website/dist`` into ``static/dist``.
 
-    Removes any stale destination (real dir or symlink) first, then copies the
-    build output so the dashboard serves the latest frontend assets without a
-    manual step. A copy (rather than a symlink) is used here so the served
-    bundle is a self-contained snapshot independent of later ``website/``
-    rebuilds — important for packaged/installed layouts.
+    Removes any stale destination (real dir, symlink, or Windows junction)
+    first, then copies the build output so the dashboard serves the latest
+    frontend assets without a manual step. A copy (rather than a link) is used
+    here so the served bundle is a self-contained snapshot independent of later
+    ``website/`` rebuilds — important for packaged/installed layouts.
     """
     static_dist = proj_path / "src" / "kiro_crew" / "static" / "dist"
     if not built_dist.is_dir():
         log(f"  ⚠️  Built dist not found at {built_dist} — dashboard may be stale")
         return
     try:
-        if static_dist.is_symlink() or static_dist.is_file():
+        # A junction (what ensure_dev_dist_symlink leaves on Windows) answers
+        # is_dir() True and is_symlink() False, and shutil.rmtree REFUSES any
+        # directory link — so it has to be unlinked, not walked.
+        if platform_compat.is_dir_link(static_dist):
+            platform_compat.unlink_dir_link(static_dist)
+        elif static_dist.is_file():
             static_dist.unlink()
         elif static_dist.is_dir():
             shutil.rmtree(static_dist)

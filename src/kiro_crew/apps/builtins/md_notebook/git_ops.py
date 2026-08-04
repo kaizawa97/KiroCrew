@@ -242,20 +242,55 @@ def _auth_env(pat: Optional[str]) -> dict[str, str]:
     return env
 
 
+def _windows_git_bin_dirs() -> tuple[str, ...]:
+    """Trusted Windows install roots for ``git.exe``, machine-wide then per-user.
+
+    Git for Windows offers a machine-wide install (``%ProgramFiles%``, needs
+    admin) AND a **per-user** install (``%LOCALAPPDATA%\\Programs\\Git``), which
+    is what a non-admin `winget install Git.Git` produces — the common case on a
+    locked-down corporate Windows box. Omitting the per-user root made every
+    Notes git operation fail closed with "no trusted git binary found" for those
+    users.
+
+    The per-user root is inside the user's profile, so it is writable by anything
+    running as that user — including the agent. That is NOT a downgrade of the
+    trust model here: the threat this resolver defends against is a *planted
+    earlier PATH entry* shadowing git, and a user who installed git per-user has
+    no machine-wide copy to prefer. We still never consult ``PATH``, and the
+    machine-wide roots are tried FIRST so a per-user shim can never win on a host
+    that has a real system git. Environment roots are read from the process env
+    rather than hardcoded so a redirected profile still resolves.
+    """
+    dirs: list[str] = []
+    for env_var, suffixes in (
+        ("ProgramFiles", (r"Git\cmd", r"Git\bin")),
+        ("ProgramFiles(x86)", (r"Git\cmd", r"Git\bin")),
+        ("ProgramW6432", (r"Git\cmd", r"Git\bin")),
+        ("LOCALAPPDATA", (r"Programs\Git\cmd", r"Programs\Git\bin")),
+    ):
+        root = os.environ.get(env_var)
+        if not root:
+            continue
+        for suffix in suffixes:
+            dirs.append(os.path.join(root, suffix))
+    # Literal fallbacks in case the env vars are stripped (some service hosts).
+    dirs += [r"C:\Program Files\Git\cmd", r"C:\Program Files\Git\bin"]
+    # Preserve order, drop duplicates.
+    return tuple(dict.fromkeys(dirs))
+
+
 #: Trusted absolute directories to resolve the ``git`` binary from, tried in
 #: order BEFORE ``PATH``: a workspace-writable entry earlier in PATH could
 #: otherwise shadow ``git`` with a planted binary that then runs unsandboxed on
 #: the next sync. On a normal POSIX host git lives in one of these, so PATH is
-#: never consulted there. The Windows entries + the ``shutil.which`` fallback
-#: exist for the CI test runners (the backend itself is macOS/Linux only).
+#: never consulted there. The Windows entries cover both the machine-wide and the
+#: per-user Git for Windows layouts (see :func:`_windows_git_bin_dirs`).
 _GIT_BIN_DIRS: tuple[str, ...] = (
     "/usr/bin",
     "/bin",
     "/usr/local/bin",
     "/opt/homebrew/bin",
-    r"C:\Program Files\Git\cmd",
-    r"C:\Program Files\Git\bin",
-)
+) + _windows_git_bin_dirs()
 _git_bin_memo: Optional[str] = None
 
 

@@ -271,6 +271,9 @@ if IS_POSIX:
 else:
     import msvcrt  # type: ignore[import-not-found]
 
+    # _winapi.CreateJunction — see symlink_dir. Windows-only stdlib module.
+    import _winapi  # type: ignore[import-not-found]
+
 
 @contextlib.contextmanager
 def file_lock(
@@ -709,9 +712,9 @@ def _windows_last_error() -> int:
 
 
 # Bounds for the exited-but-exit-FILETIME-unpublished window (see
-# _windows_process_handle_identity). The observed window closes within ~20ms;
-# the ceiling is generous enough to absorb a loaded host without letting a
-# genuinely unreadable handle stall a caller.
+# _windows_process_handle_identity). The window closes within a few tens of
+# milliseconds; the ceiling is generous enough to absorb a loaded host without
+# letting a genuinely unreadable handle stall a caller.
 _WINDOWS_EXIT_FILETIME_TIMEOUT_SECS = 0.25
 _WINDOWS_EXIT_FILETIME_POLL_SECS = 0.002
 
@@ -781,11 +784,10 @@ def _windows_process_handle_identity(handle: int) -> tuple[int, int, int | None]
         exit_value = _filetime_value(exit_)
         # GetExitCodeProcess reports the exit BEFORE the kernel publishes the
         # exit FILETIME, so a just-terminated process reads back as
-        # exited-with-exit_time==0 for a sub-millisecond-to-tens-of-milliseconds
-        # window (observed on 57/60 back-to-back spawns, resolving in
-        # 0.05-20ms). Treating that window as "no identity" makes the caller
-        # reject a perfectly good handle, so poll briefly for the real value
-        # instead. The bound stays short because the only alternative to a
+        # exited-with-exit_time==0 for a brief window (sub-millisecond to a few
+        # tens of milliseconds). Treating that window as "no identity" makes the
+        # caller reject a perfectly good handle, so poll briefly for the real
+        # value. The bound stays short because the only alternative to a
         # published exit time is refusing the handle.
         if not active and exit_value <= 0:
             deadline = time.monotonic() + _WINDOWS_EXIT_FILETIME_TIMEOUT_SECS
@@ -1631,6 +1633,106 @@ async def descendant_termination_handles_async(
 
 
 # ---------------------------------------------------------------------------
+# Directory links (symlink / Windows junction)
+# ---------------------------------------------------------------------------
+
+# Windows marks every reparse point (symlink, junction, and others) with this
+# attribute bit, and tags a directory junction ("mount point") with the tag
+# below. ``stat`` exports the attribute constant on every platform;
+# ``IO_REPARSE_TAG_MOUNT_POINT`` only exists on 3.12+, so name the documented
+# value as the fallback.
+_FILE_ATTRIBUTE_REPARSE_POINT = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+_IO_REPARSE_TAG_MOUNT_POINT = getattr(stat, "IO_REPARSE_TAG_MOUNT_POINT", 0xA0000003)
+
+
+def is_dir_link(path: str | os.PathLike) -> bool:
+    """True when *path* itself is a symlink or a Windows directory junction.
+
+    ``Path.is_symlink()`` / ``os.path.islink`` report ``False`` for a junction,
+    so a symlink-only test is blind to the ONE directory link an unprivileged
+    Windows user can create. Any code that asks "did I put a link here?" must go
+    through this, or its Windows answer is always no. A superset of
+    ``os.path.islink`` — file symlinks answer True too, so this is also the right
+    question for a name that may hold either.
+
+    Answers for a DANGLING link too (``lstat``, never ``stat``): the whole point
+    of the check is to recognise a link whose target is gone so it can be
+    replaced.
+    """
+    if os.path.islink(path):
+        return True
+    if IS_POSIX:
+        return False
+    try:
+        info = os.lstat(path)
+    except (OSError, ValueError):
+        return False
+    attrs = getattr(info, "st_file_attributes", 0)
+    if not attrs & _FILE_ATTRIBUTE_REPARSE_POINT:
+        return False
+    return getattr(info, "st_reparse_tag", 0) == _IO_REPARSE_TAG_MOUNT_POINT
+
+
+def symlink_dir(target: str | os.PathLike, link: str | os.PathLike) -> None:
+    """Point ``link`` at directory ``target`` — symlink, or junction on Windows.
+
+    Creating a symlink on Windows needs ``SeCreateSymbolicLinkPrivilege``, which
+    a standard (non-elevated, non-Developer-Mode) account does NOT hold:
+    ``os.symlink`` fails with ``WinError 1314``. A directory JUNCTION needs no
+    privilege and is transparent to every path operation Kiro Crew performs on the
+    result (``is_dir``, ``resolve``, opening files through it), so it is the
+    correct Windows spelling of "make this name mean that directory".
+
+    Junctions only accept an ABSOLUTE target, and only a directory target, so
+    *target* is resolved before the call. Falls back to ``os.symlink`` on Windows
+    when the junction attempt fails, so a host that DOES hold the privilege still
+    gets a link. Raises ``OSError`` when neither works, matching ``os.symlink``.
+    """
+    if IS_POSIX:
+        os.symlink(target, link)
+        return
+    # os.path.realpath rather than Path.resolve: junctions reject a relative or
+    # non-existent target outright, so the target has to be a real absolute dir.
+    abs_target = os.path.realpath(target)
+    try:
+        _winapi.CreateJunction(abs_target, os.fspath(link))  # type: ignore[attr-defined]
+        return
+    except (OSError, AttributeError, ValueError) as exc:
+        logger.debug("CreateJunction %s -> %s failed: %s", link, abs_target, exc)
+    os.symlink(target, link)
+
+
+def unlink_dir_link(path: str | os.PathLike) -> None:
+    """Remove a directory symlink/junction at *path* without touching its target.
+
+    ``os.unlink`` removes a junction (and a Windows directory symlink) in place
+    and leaves the target alone; ``shutil.rmtree`` REFUSES a junction outright
+    ("Cannot call rmtree on a symbolic link"), so a stale-link cleanup written as
+    "rmtree if is_dir" silently fails on Windows. POSIX needs ``os.unlink`` for a
+    symlink and would need ``rmdir`` for a real directory, so the two spellings
+    are unified here around the link case only.
+
+    Raises ``OSError`` if *path* is not a link or cannot be removed. The
+    not-a-link case must raise on BOTH platforms: the Windows ``rmdir`` fallback
+    would otherwise delete a real empty directory that POSIX's ``os.unlink``
+    refuses (``EISDIR``), turning a caller's mis-detection into silent data loss
+    on one platform only.
+    """
+    if IS_POSIX:
+        os.unlink(path)
+        return
+    try:
+        os.unlink(path)
+    except OSError:
+        # A Windows directory symlink created by an elevated process unlinks
+        # fine, but some reparse points only yield to rmdir. Confine the
+        # fallback to reparse points so a real directory still raises.
+        if not is_dir_link(path):
+            raise
+        os.rmdir(path)
+
+
+# ---------------------------------------------------------------------------
 # File permissions
 # ---------------------------------------------------------------------------
 
@@ -2370,6 +2472,20 @@ def proc_cpu_seconds() -> float:
     try:
 
         kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        # argtypes/restype are load-bearing on 64-bit: without them ctypes
+        # defaults GetCurrentProcess's return to a 32-bit int and truncates the
+        # pseudo-handle, so GetProcessTimes fails and this reads 0.0 (mirrors the
+        # proc_rss_bytes fix — same truncation, same cause).
+        kernel32.GetCurrentProcess.argtypes = []
+        kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel32.GetProcessTimes.argtypes = [
+            wintypes.HANDLE,
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+            ctypes.POINTER(wintypes.FILETIME),
+        ]
+        kernel32.GetProcessTimes.restype = wintypes.BOOL
         creation = wintypes.FILETIME()
         exit_ = wintypes.FILETIME()
         kernel = wintypes.FILETIME()

@@ -215,6 +215,9 @@ Kiro Crew runs on macOS, Linux (x86_64 and ARM), and Windows (native). `fcntl`,
 | FD soft limit | `raise_nofile_soft_limit(n)` | `resource.setrlimit` |
 | Port to PID | `find_listening_pids(port)` / `listening_pid_tool_available()` | `lsof` directly |
 | strftime no-pad | `strftime(dt, "%-I")` | bare `dt.strftime("%-I")` (`ValueError` on Windows) |
+| Link a directory | `symlink_dir(target, link)` | `Path.symlink_to` (Windows needs `SeCreateSymbolicLinkPrivilege`; `WinError 1314`) |
+| Is this name a dir link? | `is_dir_link(path)` | `Path.is_symlink()` (`False` for a Windows junction) |
+| Remove a directory link | `unlink_dir_link(path)` | `shutil.rmtree` (refuses any directory link) |
 
 Verify process, signal, file-lock, and metrics changes on macOS + Linux. Frontend:
 Chrome, Firefox, Safari, Edge, using standard Web APIs and guarding the rest.

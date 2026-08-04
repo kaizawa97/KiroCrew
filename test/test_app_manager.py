@@ -7,9 +7,11 @@ import os
 import shutil
 
 import pytest
+from conftest import requires_symlinks
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from kiro_crew import platform_compat
 from kiro_crew.apps.manager import (
     APP_MANIFEST_FILENAME,
     AppResult,
@@ -1054,6 +1056,7 @@ class TestCleanupMigratedBuiltin:
 
 
 class TestCopyAppTree:
+    @requires_symlinks
     def test_symlink_escaping_source_root_omitted(self, tmp_path, app_home):
         """A symlink resolving outside the app source is omitted — never
         followed (no multi-GB walk) and never preserved (nothing in the
@@ -1077,6 +1080,7 @@ class TestCopyAppTree:
         copied_files = [p for p in dest.rglob("*") if p.is_file() and not p.is_symlink()]
         assert not any("file0.bin" in str(p) for p in copied_files)
 
+    @requires_symlinks
     def test_symlink_inside_source_root_preserved(self, tmp_path, app_home):
         """An in-tree symlink is preserved — and an ABSOLUTE in-tree link is
         rewritten to a relative link targeting the installed copy, so the
@@ -1104,6 +1108,47 @@ class TestCopyAppTree:
         _shutil.rmtree(src)
         assert (link / "common.js").is_file()
         assert link.resolve().is_relative_to(dest.resolve())
+
+    @pytest.mark.skipif(
+        not platform_compat.IS_WINDOWS, reason="junctions exist only on Windows"
+    )
+    def test_real_junction_is_omitted_and_never_walked(self, tmp_path, app_home):
+        """Windows counterpart to the two symlink cases above.
+
+        A junction is the only directory link an unprivileged Windows account can
+        create, so it — not a symlink — is what a real app source carries there.
+        Both halves of the escaping-symlink guarantee must hold for it: the link
+        is absent from the installed tree, and its target was never walked (the
+        multi-GB-copy failure mode). Uses a REAL junction rather than
+        ``test_directory_junction_omitted``'s monkeypatched ``os.path.isjunction``,
+        so it also proves the production detection recognises the genuine
+        reparse tag.
+        """
+        src = _make_app_source(tmp_path)
+        outside = tmp_path / "big-target"
+        outside.mkdir()
+        (outside / "file0.bin").write_text("x" * 1024)
+        platform_compat.symlink_dir(outside, src / "assets-link")
+        # In-tree junctions are omitted too: copytree cannot preserve a junction
+        # as a link, and copying THROUGH one would duplicate the target's bytes.
+        (src / "shared").mkdir()
+        (src / "shared" / "common.js").write_text("export {}")
+        platform_compat.symlink_dir(src / "shared", src / "alias")
+
+        result = install_app(src)
+        assert result.ok, result.error
+
+        from kiro_crew.apps.manager import app_dir
+
+        dest = app_dir("test-app")
+        # lexists, not exists: exists() follows a link, so a preserved-but-broken
+        # link would read as absent and the omission would go unverified.
+        assert not os.path.lexists(str(dest / "assets-link"))
+        assert not os.path.lexists(str(dest / "alias"))
+        assert not any("file0.bin" in str(p) for p in dest.rglob("*"))
+        # The real (non-link) payload still installs — omission is scoped to links.
+        assert (dest / "shared" / "common.js").is_file()
+        assert (dest / APP_MANIFEST_FILENAME).is_file()
 
     def test_denylist_dirs_dropped_runtime_payload_kept(self, tmp_path, app_home):
         src = _make_app_source(tmp_path)
@@ -1324,8 +1369,11 @@ class TestBootSkillReconcile:
 
         assert len(registered) == 1
         assert "test-app/my-skill" in registered
-        assert (skills_root / "test-app" / "my-skill").is_symlink()
-        assert (skills_root / "my-skill").is_symlink()
+        # is_dir_link, not is_symlink: registration links with a directory
+        # junction on Windows (an unprivileged account cannot make a symlink)
+        # and a junction reports is_symlink() False.
+        assert platform_compat.is_dir_link(skills_root / "test-app" / "my-skill")
+        assert platform_compat.is_dir_link(skills_root / "my-skill")
         # Registration must target the immutable shipped skill, not its install.
         assert (skills_root / "test-app" / "my-skill").resolve() == skill_dir.resolve()
 
@@ -1344,8 +1392,10 @@ class TestBootSkillReconcile:
         app_skills_dir.mkdir(parents=True)
         stale_target = tmp_path / "old-skill"
         stale_target.mkdir()
-        os.symlink(str(stale_target), str(app_skills_dir / "old-skill"))
-        os.symlink(str(stale_target), str(skills_root / "old-skill"))
+        # Plant the stale links the way registration would have created them, so
+        # the sweep is exercised against its own real artifact on both platforms.
+        platform_compat.symlink_dir(stale_target, app_skills_dir / "old-skill")
+        platform_compat.symlink_dir(stale_target, skills_root / "old-skill")
 
         # Write installed state and ship the authoritative builtin resources.
         installed = {
@@ -1382,13 +1432,15 @@ class TestBootSkillReconcile:
 
         # Kept skill is registered from immutable provenance.
         assert "test-app/kept-skill" in registered
-        assert (skills_root / "test-app" / "kept-skill").is_symlink()
+        assert platform_compat.is_dir_link(skills_root / "test-app" / "kept-skill")
         assert (
             skills_root / "test-app" / "kept-skill"
         ).resolve() == kept_skill.resolve()
-        # Stale skill symlinks removed
-        assert not (app_skills_dir / "old-skill").exists()
-        assert not (skills_root / "old-skill").exists()
+        # Stale skill links removed. lexists, not exists: exists() follows the
+        # link, so a link left behind pointing at a since-deleted target would
+        # read as "removed" and the sweep's failure would go unnoticed.
+        assert not os.path.lexists(str(app_skills_dir / "old-skill"))
+        assert not os.path.lexists(str(skills_root / "old-skill"))
 
 
 # ---------------------------------------------------------------------------

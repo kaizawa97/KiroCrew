@@ -984,11 +984,21 @@ _RESERVED_SKILL_DIRS = {"auto"}
 
 
 def _register_skills(app_name: str, manifest: AppManifest, app_root: Path) -> list[str]:
-    """Symlink app skill directories into ~/.kiro/crew/skills/.
+    """Link app skill directories into ~/.kiro/crew/skills/.
 
     Creates both a namespaced link (``skills/{app_name}/{skill_name}``) and a
     flat link (``skills/{skill_name}``) so the skill scanner finds the skill
     regardless of whether it walks subdirectories or only checks the top level.
+
+    The link is a symlink on POSIX and a directory junction on Windows
+    (``platform_compat.symlink_dir``), because a Windows symlink needs
+    ``SeCreateSymbolicLinkPrivilege`` that an ordinary account does not hold —
+    raw ``os.symlink`` raises ``WinError 1314`` and every app would register
+    zero skills. Link-ness is likewise tested with ``is_dir_link``, never
+    ``is_symlink``: a junction reports ``is_symlink() is False``, so a
+    symlink-only test would classify a link this function created as a real
+    directory and hand it to ``shutil.rmtree``, which refuses any directory
+    link — breaking every RE-registration.
 
     Returns list of registered skill names (namespaced).
     """
@@ -1021,9 +1031,9 @@ def _register_skills(app_name: str, manifest: AppManifest, app_root: Path) -> li
 
         # Namespaced link: ~/.kiro/crew/skills/{app_name}/{skill_name}
         link_path = app_skills_dir / skill_name
-        if link_path.exists() or link_path.is_symlink():
-            if link_path.is_symlink():
-                link_path.unlink()
+        if link_path.exists() or platform_compat.is_dir_link(link_path):
+            if platform_compat.is_dir_link(link_path):
+                platform_compat.unlink_dir_link(link_path)
             else:
                 shutil.rmtree(link_path)
 
@@ -1033,26 +1043,26 @@ def _register_skills(app_name: str, manifest: AppManifest, app_root: Path) -> li
             flat_link = None
         else:
             flat_link = skills_root / skill_name
-            if flat_link.exists() or flat_link.is_symlink():
-                if flat_link.is_symlink():
-                    flat_link.unlink()
+            if flat_link.exists() or platform_compat.is_dir_link(flat_link):
+                if platform_compat.is_dir_link(flat_link):
+                    platform_compat.unlink_dir_link(flat_link)
                 else:
                     logger.info(
-                        "App %s: skipping flat link for %s — non-symlink dir exists",
+                        "App %s: skipping flat link for %s — real dir exists",
                         app_name,
                         skill_name,
                     )
                     flat_link = None  # type: ignore[assignment]
 
         try:
-            os.symlink(str(skill_path), str(link_path))
+            platform_compat.symlink_dir(skill_path, link_path)
             if flat_link is not None:
-                os.symlink(str(skill_path), str(flat_link))
+                platform_compat.symlink_dir(skill_path, flat_link)
             namespaced = _namespace(app_name, skill_name)
             registered.append(namespaced)
             logger.info("Registered skill: %s -> %s", namespaced, skill_path)
         except OSError as exc:
-            logger.warning("Failed to symlink skill %s: %s", skill_name, exc)
+            logger.warning("Failed to link skill %s: %s", skill_name, exc)
 
     if registered:
         sel().log_tool_invocation(
@@ -1078,9 +1088,9 @@ def _register_skills(app_name: str, manifest: AppManifest, app_root: Path) -> li
 
 
 def _deregister_skills(app_name: str) -> int:
-    """Remove the app's skill symlinks from ~/.kiro/crew/skills/.
+    """Remove the app's skill links from ~/.kiro/crew/skills/.
 
-    Removes **only what registration created** — the symlinks, and the directory
+    Removes **only what registration created** — the links, and the directory
     itself once it holds nothing else. It must NOT ``rmtree`` unconditionally: when a
     PACKAGED builtin skill shares the app's name, ``skills/<app_name>/`` is that
     skill's real directory, not an app-owned link farm. Blowing it away deleted a
@@ -1095,16 +1105,22 @@ def _deregister_skills(app_name: str) -> int:
     if not app_skills_dir.exists():
         return 0
     try:
-        removed_skills = [item.name for item in app_skills_dir.iterdir() if item.is_symlink()]
+        # is_dir_link, not is_symlink: _register_skills creates a junction on
+        # Windows, which reports is_symlink() False — a symlink-only test would
+        # find zero links here and leak every flat link into the skills root,
+        # still pointing at an app that is being deregistered.
+        removed_skills = [
+            item.name for item in app_skills_dir.iterdir() if platform_compat.is_dir_link(item)
+        ]
         for item in app_skills_dir.iterdir():
-            if item.is_symlink():
+            if platform_compat.is_dir_link(item):
                 if item.name in _RESERVED_SKILL_DIRS:
                     continue
                 target = item.resolve()
                 flat_link = skills_root / item.name
-                if flat_link.is_symlink() and flat_link.resolve() == target:
-                    flat_link.unlink()
-                item.unlink()
+                if platform_compat.is_dir_link(flat_link) and flat_link.resolve() == target:
+                    platform_compat.unlink_dir_link(flat_link)
+                platform_compat.unlink_dir_link(item)
         # Only prune the directory if registration is all that was ever in it.
         # Any surviving real file means this path belongs to something else.
         if any(app_skills_dir.iterdir()):
@@ -1147,15 +1163,15 @@ def _deregister_skills(app_name: str) -> int:
 
 
 def reconcile_app_skills(app_name: str) -> list[str]:
-    """Reconcile skill symlinks for an enabled app at gateway startup.
+    """Reconcile skill links for an enabled app at gateway startup.
 
     Ensures manifest-declared skills are registered (idempotent: existing
-    correct symlinks are overwritten by _register_skills, missing ones are
-    created).  Also removes stale symlinks for skills that were removed from
+    correct links are overwritten by _register_skills, missing ones are
+    created).  Also removes stale links for skills that were removed from
     the manifest since the last registration.
 
     Called from start_enabled_app_backends() so that an app upgraded in-place
-    (new manifest declaring new skills) gets its symlinks without needing a
+    (new manifest declaring new skills) gets its links without needing a
     disable/enable cycle.
 
     Returns list of currently-registered namespaced skill names.
@@ -1186,22 +1202,24 @@ def reconcile_app_skills(app_name: str) -> list[str]:
     # _register_skills is already idempotent (overwrites existing symlinks)
     registered = _register_skills(app_name, manifest, app_root)
 
-    # Clean stale links: skills present as symlinks but no longer in manifest
+    # Clean stale links: skills still linked but no longer in the manifest.
+    # is_dir_link, not is_symlink, so a Windows junction (what _register_skills
+    # creates there) is recognised as OUR link and actually gets swept.
     skills_root = _skills_dir()
     app_skills_dir = skills_root / app_name
     if app_skills_dir.is_dir():
         manifest_skill_names = {Path(s).name for s in manifest.skills}
         for entry in list(app_skills_dir.iterdir()):
-            if entry.is_symlink() and entry.name not in manifest_skill_names:
+            if platform_compat.is_dir_link(entry) and entry.name not in manifest_skill_names:
                 # Stale link — skill was removed from manifest
                 target = entry.resolve()
-                entry.unlink()
+                platform_compat.unlink_dir_link(entry)
                 # Also remove the flat link if it points to the same target
                 flat_link = skills_root / entry.name
-                if flat_link.is_symlink():
+                if platform_compat.is_dir_link(flat_link):
                     try:
                         if flat_link.resolve() == target:
-                            flat_link.unlink()
+                            platform_compat.unlink_dir_link(flat_link)
                     except OSError:
                         pass
                 logger.info(

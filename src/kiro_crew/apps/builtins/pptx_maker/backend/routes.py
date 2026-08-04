@@ -883,11 +883,18 @@ def _write_deck_root(deck_root: str) -> tuple[int, dict]:
 
     The value is RESOLVED before it is stored, because storing it is what makes a
     bad value permanent. ``paths.deck_root()`` resolves the configured string on
-    every read, and ``Path.resolve()`` raises ``ValueError`` for a path holding an
-    embedded NUL — so accepting one here wedged the app: this endpoint answered
-    200, and every later ``GET /config`` and every deck route then raised out of
-    ``deck_root()`` as a 500, including the settings page needed to correct it. The
-    only recovery was editing the engine's config file by hand.
+    every read, and a path holding an embedded NUL raises ``ValueError`` at the
+    filesystem boundary — so accepting one here wedges the app: this endpoint
+    answers 200, and every later ``GET /config`` and every deck route then raises
+    out of ``deck_root()`` as a 500, including the settings page needed to correct
+    it. The only recovery is editing the engine's config file by hand.
+
+    A NUL is rejected EXPLICITLY rather than by catching ``resolve()``: on POSIX
+    ``Path.resolve()`` itself raises, but on Windows it succeeds (``ntpath`` does
+    the work in pure Python and never touches the OS for a non-existent path), so
+    the ``try`` alone let the wedge through — ``iterdir``/``mkdir`` are then the
+    first calls to raise, one layer too late to refuse. The check is on the RAW
+    string because expansion cannot introduce or remove a NUL.
 
     Rejecting it costs the user one 400 on a value that could never have worked.
 
@@ -911,6 +918,12 @@ def _write_deck_root(deck_root: str) -> tuple[int, dict]:
 
     BLOCKING — call through ``off_loop``.
     """
+    if "\x00" in deck_root:
+        logger.warning("pptx-maker: refused a deck root containing a NUL byte")
+        return 400, {
+            "error": "that deck folder is not a usable path",
+            "code": "invalid_deck_root",
+        }
     try:
         # Same expansion order as `paths.deck_root`, so what is validated is what
         # will later be resolved — checking a differently-derived path would leave

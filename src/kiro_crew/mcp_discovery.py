@@ -1164,6 +1164,76 @@ async def probe_all() -> list[McpServerInfo]:
     return out
 
 
+# Executable suffixes folded away when matching a bare command name against its
+# resolved path on Windows.  ``shutil.which`` (which ``agent._resolve_command``
+# uses) appends the extension as ``PATHEXT`` spells it — commonly upper-case, so
+# ``npx`` resolves to ``...\npx.CMD``.  Without folding, every stdio MCP server
+# on Windows compares as divergent forever.  The fallback mirrors the Windows
+# default for the pathological case of an unset ``PATHEXT``.
+_DEFAULT_PATHEXT = ".COM;.EXE;.BAT;.CMD"
+
+
+def _win_exec_suffixes() -> frozenset[str]:
+    """Lower-cased ``PATHEXT`` suffixes, read live so a host change is honored."""
+    raw = os.environ.get("PATHEXT") or _DEFAULT_PATHEXT
+    return frozenset(
+        s for s in (part.strip().lower() for part in raw.split(os.pathsep)) if s.startswith(".")
+    )
+
+
+def _command_key(cmd: str) -> str:
+    """Comparison key for an MCP command string.
+
+    On Windows, folds the case-insensitive, separator-agnostic path semantics so
+    one binary written two ways (``C:/x/npx.cmd`` vs ``C:\\x\\npx.CMD``) compares
+    equal.  Identity on POSIX, where paths are case-sensitive and ``/`` is the
+    only separator.
+    """
+    if not cmd or not platform_compat.IS_WINDOWS:
+        return cmd
+    return os.path.normcase(os.path.normpath(cmd))
+
+
+def _names_a_location(cmd: str) -> bool:
+    """True when *cmd* is a rooted path rather than a bare ``PATH`` lookup name.
+
+    ``ntpath.isabs`` rejects a driveless root (``/usr/bin/x``, ``\\bin\\x``)
+    because it is only absolute relative to the current drive — yet such a
+    string still names a location whose basename is meaningful, and a portable
+    ``mcp.json`` copied from macOS/Linux carries exactly that shape.  Accepting a
+    leading separator directly keeps discovery reading those identically on
+    every host.
+    """
+    if os.path.isabs(cmd):
+        return True
+    return platform_compat.IS_WINDOWS and cmd[:1] in ("/", "\\")
+
+
+def _is_bare_name(cmd: str) -> bool:
+    """True when *cmd* carries no path separator, so PATH lookup resolves it.
+
+    A relative path (``bin/srv``, ``./srv``) is neither rooted nor a bare name:
+    it designates a specific file relative to the CWD, so it must NOT match an
+    unrelated rooted path that merely shares a basename.
+    """
+    return "/" not in cmd and (not platform_compat.IS_WINDOWS or "\\" not in cmd)
+
+
+def _basename_key(cmd: str) -> str:
+    """Comparison key for *cmd* reduced to its bare executable name.
+
+    Strips at most one trailing ``PATHEXT`` suffix, and only from the rooted
+    side, because ``shutil.which`` is what appended it.  Stripping both sides
+    would collapse genuinely different binaries (``foo.bat`` vs ``foo.cmd``).
+    """
+    base = os.path.basename(cmd)
+    if platform_compat.IS_WINDOWS and not _is_bare_name(cmd):
+        stem, ext = os.path.splitext(base)
+        if ext.lower() in _win_exec_suffixes():
+            base = stem
+    return _command_key(base)
+
+
 def _commands_diverged(source_cmd: str, agent_cmd: str) -> bool:
     """Compare MCP commands accounting for path resolution.
 
@@ -1172,13 +1242,17 @@ def _commands_diverged(source_cmd: str, agent_cmd: str) -> bool:
     short name (deep-research). These refer to the same binary and
     should not trigger a sync.
     """
-    if source_cmd == agent_cmd:
+    if _command_key(source_cmd) == _command_key(agent_cmd):
         return False
-    # If one is an absolute resolved path of the other, they match.
-    if os.path.isabs(agent_cmd) and os.path.basename(agent_cmd) == source_cmd:
-        return False
-    if os.path.isabs(source_cmd) and os.path.basename(source_cmd) == agent_cmd:
-        return False
+    # The only pairing that means "same binary, two spellings" is a rooted path
+    # on one side and a BARE PATH-lookup name on the other, since PATH lookup is
+    # exactly what produced the rooted form.  Both conditions are required:
+    # two distinct rooted paths sharing a basename (/opt/a/srv vs /opt/b/srv) and
+    # a CWD-relative path (bin/srv) each designate a specific different file.
+    rooted, bare = _names_a_location(source_cmd), _is_bare_name(source_cmd)
+    other_rooted, other_bare = _names_a_location(agent_cmd), _is_bare_name(agent_cmd)
+    if (rooted and other_bare) or (other_rooted and bare):
+        return _basename_key(source_cmd) != _basename_key(agent_cmd)
     return True
 
 

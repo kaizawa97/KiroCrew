@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import errno
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -400,6 +401,12 @@ class TestResourceShims:
     def test_proc_cpu_seconds_nonnegative(self):
         assert pc.proc_cpu_seconds() >= 0.0
 
+    def test_proc_cpu_seconds_is_positive_for_a_running_process(self):
+        # A running interpreter has always consumed some CPU. This must be > 0
+        # on every supported platform: on Windows GetCurrentProcess's handle was
+        # truncated without argtypes, so GetProcessTimes failed and this read 0.0.
+        assert pc.proc_cpu_seconds() > 0.0
+
     def test_raise_nofile_soft_limit_is_safe(self):
         # No-op on Windows; best-effort raise on POSIX. Must never raise.
         pc.raise_nofile_soft_limit(4096)
@@ -419,6 +426,142 @@ class TestChmodShims:
             pc.fchmod_safe(fd, 0o600)   # applies on POSIX, no-op on Windows
         finally:
             os.close(fd)
+
+
+class TestDirLinkShims:
+    """``symlink_dir`` / ``is_dir_link`` / ``unlink_dir_link``.
+
+    These run on every platform: the contract is the same everywhere (a name
+    that means another directory), only the mechanism differs — a symlink on
+    POSIX, a directory junction on Windows, where an ordinary account holds no
+    ``SeCreateSymbolicLinkPrivilege`` and ``os.symlink`` fails with
+    ``WinError 1314``.
+    """
+
+    def test_link_is_created_and_transparent(self, tmp_path):
+        target = tmp_path / "target"
+        target.mkdir()
+        (target / "index.html").write_text("hi")
+        link = tmp_path / "link"
+
+        pc.symlink_dir(target, link)
+
+        assert pc.is_dir_link(link)
+        assert link.is_dir()
+        assert link.resolve() == target.resolve()
+        # Reads go through, and later writes to the target are visible via the
+        # link — the property the dist resolver relies on for rebuild pickup.
+        assert (link / "index.html").read_text(encoding="utf-8") == "hi"
+        (target / "later.txt").write_text("fresh")
+        assert (link / "later.txt").read_text(encoding="utf-8") == "fresh"
+
+    def test_plain_dir_and_file_are_not_links(self, tmp_path):
+        plain = tmp_path / "plain"
+        plain.mkdir()
+        regular = tmp_path / "f.txt"
+        regular.write_text("x")
+
+        assert not pc.is_dir_link(plain)
+        assert not pc.is_dir_link(regular)
+        assert not pc.is_dir_link(tmp_path / "does-not-exist")
+
+    def test_dangling_link_is_still_reported_as_a_link(self, tmp_path):
+        """A link whose target is gone must still answer True.
+
+        The dist resolver's replace path keys off exactly this: ``exists()``
+        follows the link and is already False, so only the link-ness test can
+        tell "stale link to clean up" from "nothing here".
+        """
+        target = tmp_path / "target"
+        target.mkdir()
+        link = tmp_path / "link"
+        pc.symlink_dir(target, link)
+        shutil.rmtree(target)
+
+        assert pc.is_dir_link(link)
+        assert not link.exists()
+
+    def test_unlink_removes_the_link_and_spares_the_target(self, tmp_path):
+        target = tmp_path / "target"
+        target.mkdir()
+        (target / "keep.txt").write_text("keep")
+        link = tmp_path / "link"
+        pc.symlink_dir(target, link)
+
+        pc.unlink_dir_link(link)
+
+        assert not pc.is_dir_link(link)
+        assert not os.path.lexists(str(link))
+        assert (target / "keep.txt").read_text(encoding="utf-8") == "keep"
+
+    def test_unlink_removes_a_dangling_link(self, tmp_path):
+        target = tmp_path / "target"
+        target.mkdir()
+        link = tmp_path / "link"
+        pc.symlink_dir(target, link)
+        shutil.rmtree(target)
+
+        pc.unlink_dir_link(link)
+
+        assert not os.path.lexists(str(link))
+
+    def test_unlink_refuses_a_real_directory(self, tmp_path):
+        """A non-link must raise on both platforms, empty or not.
+
+        POSIX ``os.unlink`` refuses a directory outright, so the Windows
+        ``rmdir`` fallback has to be fenced to reparse points: unfenced it
+        DELETES a real empty directory, so a caller that mis-detects link-ness
+        loses data on Windows only while POSIX raises.
+        """
+        empty = tmp_path / "real-empty"
+        empty.mkdir()
+        full = tmp_path / "real-full"
+        full.mkdir()
+        (full / "keep.txt").write_text("keep")
+
+        with pytest.raises(OSError):
+            pc.unlink_dir_link(empty)
+        with pytest.raises(OSError):
+            pc.unlink_dir_link(full)
+
+        assert empty.is_dir()
+        assert (full / "keep.txt").read_text(encoding="utf-8") == "keep"
+
+    @pytest.mark.skipif(not pc.IS_WINDOWS, reason="junctions exist only on Windows")
+    def test_windows_link_is_a_junction_not_a_symlink(self, tmp_path):
+        """The Windows mechanism must be the unprivileged one.
+
+        Asserting the junction (and NOT a symlink) is what pins the fix: a
+        symlink here would mean the resolver is back to needing
+        ``SeCreateSymbolicLinkPrivilege``, and ``is_symlink()``-based cleanup
+        elsewhere would start silently mis-classifying our own link.
+        """
+        target = tmp_path / "target"
+        target.mkdir()
+        link = tmp_path / "link"
+
+        pc.symlink_dir(target, link)
+
+        assert not link.is_symlink(), "a Windows symlink would need elevation"
+        # 0xA0000003 = IO_REPARSE_TAG_MOUNT_POINT, spelled literally rather
+        # than read from the module under test (so the assertion is independent
+        # of it) and rather than via os.path.isjunction (3.12+ only, while this
+        # project supports 3.10).
+        assert os.lstat(str(link)).st_reparse_tag == 0xA0000003
+        # rmtree refuses any directory link, which is why unlink_dir_link exists.
+        with pytest.raises(OSError):
+            shutil.rmtree(str(link))
+
+    @pytest.mark.skipif(not pc.IS_POSIX, reason="POSIX symlink mechanism")
+    def test_posix_link_is_a_symlink(self, tmp_path):
+        target = tmp_path / "target"
+        target.mkdir()
+        link = tmp_path / "link"
+
+        pc.symlink_dir(target, link)
+
+        assert link.is_symlink()
+        assert os.readlink(str(link)) == str(target)
 
 
 # ---------------------------------------------------------------------------

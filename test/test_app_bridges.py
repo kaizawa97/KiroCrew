@@ -15,6 +15,7 @@ import pytest
 from hypothesis import HealthCheck, assume, given, settings
 from hypothesis import strategies as st
 
+from kiro_crew import platform_compat
 from kiro_crew.apps.bridges import (
     RegistrationResult,
     _deregister_agents,
@@ -309,12 +310,23 @@ class TestSkillRegistration:
         assert len(registered) == 1
         assert "test-app/my-skill" in registered
 
-        # Verify symlink exists under ~/.kirocrew/skills/test-app/my-skill
+        # A LINK under ~/.kiro/crew/skills/test-app/my-skill, not a copy —
+        # is_dir_link, not is_symlink, because the Windows spelling is a
+        # directory junction (a symlink there needs a privilege an ordinary
+        # account lacks) and a junction reports is_symlink() False.
         skill_link = app_env["home"] / "skills" / "test-app" / "my-skill"
-        assert skill_link.is_symlink()
+        assert platform_compat.is_dir_link(skill_link)
+        assert skill_link.resolve() == (app_root / "skills" / "my-skill").resolve()
         assert (skill_link / "SKILL.md").is_file()
 
     def test_deregister_skills(self, tmp_path, app_env):
+        """BOTH links registration created must go — namespaced and flat.
+
+        The flat link lives in the skills ROOT, outside the namespaced directory
+        the rmtree removes, so it is only cleaned by the per-item sweep. A sweep
+        that misses it leaves the skills root advertising a skill whose app is
+        deregistered (and, once the app is uninstalled, a dangling link).
+        """
         src = _make_app_source(tmp_path)
         install_app(src)
         manifest = AppManifest.from_json_file(
@@ -322,9 +334,17 @@ class TestSkillRegistration:
         )
         app_root = app_env["home"] / "apps" / "test-app"
         _register_skills("test-app", manifest, app_root)
+        skills_root = app_env["home"] / "skills"
+        # Guard the premise: without this, a registration that silently made no
+        # flat link would let the post-condition below pass vacuously.
+        assert platform_compat.is_dir_link(skills_root / "my-skill")
 
         _deregister_skills("test-app")
-        assert not (app_env["home"] / "skills" / "test-app").exists()
+
+        assert not (skills_root / "test-app").exists()
+        # lexists: exists() follows the link, so a leaked link whose target the
+        # uninstall later removes would read as already cleaned.
+        assert not os.path.lexists(str(skills_root / "my-skill"))
 
     def test_missing_skill_dir_skipped(self, tmp_path, app_env):
         src = _make_app_source(tmp_path, skills=["skills/nonexistent"])

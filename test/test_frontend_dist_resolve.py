@@ -3,20 +3,28 @@
 Covers the runtime dist-resolution contract described:
 
 * pre-bundled real directory is left alone (packaged install / prior build)
-* valid symlink is kept
-* dangling / empty symlink is replaced
-* sibling ``KiroCrewWebsite/dist`` is resolved and symlinked
+* valid directory link is kept
+* dangling / empty link is replaced
+* sibling ``KiroCrewWebsite/dist`` is resolved and linked
 * nothing-found returns ``None`` (caller logs warning and serves legacy UI)
+
+The link the resolver creates is a symlink on POSIX and a directory JUNCTION on
+Windows (a Windows symlink needs ``SeCreateSymbolicLinkPrivilege``, which an
+ordinary account lacks). These tests therefore build and assert links through
+``platform_compat`` rather than ``Path.symlink_to`` / ``Path.is_symlink`` — the
+latter reports ``False`` for a junction, so a symlink-only assertion is not the
+invariant on Windows.
 """
 
 from __future__ import annotations
 
+import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from kiro_crew import frontend
+from kiro_crew import frontend, platform_compat
 
 
 def _fake_kiro_crew_package(root: Path) -> Path:
@@ -31,6 +39,18 @@ def _make_dist(path: Path) -> Path:
     path.mkdir(parents=True)
     (path / "index.html").write_text("<!doctype html><html></html>")
     return path
+
+
+def _make_dangling_link(link: Path, dead_target: Path) -> None:
+    """Leave a directory link at *link* whose target does not exist.
+
+    A Windows junction can only be created against an existing directory, so the
+    dangling state is reached by linking a real dir and then deleting it — the
+    junction survives its target on NTFS exactly as a symlink survives its own.
+    """
+    dead_target.mkdir(parents=True, exist_ok=True)
+    platform_compat.symlink_dir(dead_target, link)
+    shutil.rmtree(dead_target)
 
 
 @pytest.fixture
@@ -66,35 +86,34 @@ def test_prebundled_real_dir_left_untouched(fake_pkg, monkeypatch):
     result = frontend.ensure_dev_dist_symlink()
 
     assert result == tree_dist
-    assert not tree_dist.is_symlink()
+    assert not platform_compat.is_dir_link(tree_dist)
     assert sentinel.read_text(encoding="utf-8") == "toolbox"
 
 
-# ── Case 2: existing symlinks ──────────────────────────────────────────────
+# ── Case 2: existing directory links ───────────────────────────────────────
 
 
 def test_valid_symlink_is_kept(fake_pkg, tmp_path, monkeypatch):
-    """A symlink pointing at a valid dist stays as-is."""
+    """A link pointing at a valid dist stays as-is."""
     real_dist = _make_dist(tmp_path / "real-dist")
     tree_dist = fake_pkg / "static" / "dist"
     tree_dist.parent.mkdir(parents=True)
-    tree_dist.symlink_to(real_dist)
+    platform_compat.symlink_dir(real_dist, tree_dist)
 
     monkeypatch.setattr(subprocess, "run", _no_brazil_path)
 
     result = frontend.ensure_dev_dist_symlink()
 
     assert result == real_dist.resolve()
-    assert tree_dist.is_symlink()
+    assert platform_compat.is_dir_link(tree_dist)
     assert tree_dist.resolve() == real_dist.resolve()
 
 
 def test_dangling_symlink_is_replaced_when_candidate_exists(fake_pkg, tmp_path, monkeypatch):
     """Stale link (target gone) gets repointed at a freshly-resolved dist."""
-    dead_target = tmp_path / "gone"
     tree_dist = fake_pkg / "static" / "dist"
     tree_dist.parent.mkdir(parents=True)
-    tree_dist.symlink_to(dead_target)  # dangling
+    _make_dangling_link(tree_dist, tmp_path / "gone")
 
     # Sibling checkout has a fresh dist — resolver should pick it up.
     sibling_dist = _make_dist(fake_pkg.parent.parent.parent / "KiroCrewWebsite" / "dist")
@@ -104,7 +123,7 @@ def test_dangling_symlink_is_replaced_when_candidate_exists(fake_pkg, tmp_path, 
     result = frontend.ensure_dev_dist_symlink()
 
     assert result == sibling_dist.resolve()
-    assert tree_dist.is_symlink()
+    assert platform_compat.is_dir_link(tree_dist)
     assert tree_dist.resolve() == sibling_dist.resolve()
 
 
@@ -112,21 +131,25 @@ def test_dangling_symlink_with_no_candidate_returns_none(fake_pkg, tmp_path, mon
     """Stale link + nothing to resolve → clean up and warn (returns None)."""
     tree_dist = fake_pkg / "static" / "dist"
     tree_dist.parent.mkdir(parents=True)
-    tree_dist.symlink_to(tmp_path / "also-gone")
+    _make_dangling_link(tree_dist, tmp_path / "also-gone")
 
     monkeypatch.setattr(subprocess, "run", _no_brazil_path)
 
     assert frontend.ensure_dev_dist_symlink() is None
-    assert not tree_dist.is_symlink()  # stale link was removed (exists() follows symlinks)
+    # The stale link is gone from the namespace entirely — asserted with
+    # lexists (never exists(), which follows the link and is already False
+    # while the dangling link is still sitting there).
+    assert not tree_dist.exists()
+    assert not platform_compat.is_dir_link(tree_dist)
 
 
 def test_symlink_to_empty_dir_is_replaced(fake_pkg, tmp_path, monkeypatch):
-    """Symlink target exists but has no index.html — treat as unusable."""
+    """Link target exists but has no index.html — treat as unusable."""
     empty_target = tmp_path / "empty-target"
     empty_target.mkdir()
     tree_dist = fake_pkg / "static" / "dist"
     tree_dist.parent.mkdir(parents=True)
-    tree_dist.symlink_to(empty_target)
+    platform_compat.symlink_dir(empty_target, tree_dist)
 
     sibling_dist = _make_dist(fake_pkg.parent.parent.parent / "KiroCrewWebsite" / "dist")
     monkeypatch.setattr(subprocess, "run", _no_brazil_path)
@@ -140,7 +163,7 @@ def test_symlink_to_empty_dir_is_replaced(fake_pkg, tmp_path, monkeypatch):
 # ── Case 3: fresh resolution ───────────────────────────────────────────────
 
 
-def test_sibling_checkout_is_symlinked(fake_pkg, monkeypatch):
+def test_sibling_checkout_is_linked(fake_pkg, monkeypatch):
     """Sibling KiroCrewWebsite/dist wins even when brazil-path is available."""
     sibling_dist = _make_dist(fake_pkg.parent.parent.parent / "KiroCrewWebsite" / "dist")
 
@@ -154,7 +177,7 @@ def test_sibling_checkout_is_symlinked(fake_pkg, monkeypatch):
     tree_dist = fake_pkg / "static" / "dist"
 
     assert result == sibling_dist.resolve()
-    assert tree_dist.is_symlink()
+    assert platform_compat.is_dir_link(tree_dist)
     assert tree_dist.resolve() == sibling_dist.resolve()
 
 
@@ -223,7 +246,7 @@ def test_no_sibling_no_brazil_returns_none(fake_pkg, monkeypatch):
 
 
 def test_empty_real_dir_is_replaced_when_candidate_exists(fake_pkg, monkeypatch):
-    """A real dir with no index.html is unusable — replace with a symlink."""
+    """A real dir with no index.html is unusable — replace with a link."""
     tree_dist = fake_pkg / "static" / "dist"
     tree_dist.mkdir(parents=True)  # empty — no index.html
 
@@ -233,18 +256,18 @@ def test_empty_real_dir_is_replaced_when_candidate_exists(fake_pkg, monkeypatch)
     result = frontend.ensure_dev_dist_symlink()
 
     assert result == sibling_dist.resolve()
-    assert tree_dist.is_symlink()
+    assert platform_compat.is_dir_link(tree_dist)
 
 
-# ── Regression: the existing pwa_file symlink test still passes ────────────
+# ── Regression: the existing pwa_file link test still passes ───────────────
 
 
 def test_resolver_produces_a_symlink_the_pwa_guard_accepts(fake_pkg, tmp_path, monkeypatch):
     """The pwa_file handler (dashboard/handlers/core.py) rejects paths whose
     resolved target lies outside ``_DIST_DIR.resolve()``. This test verifies
-    the new resolver still produces the symlink shape that test already
-    guarantees — a symlink where ``resolve()`` on both sides yields equal
-    prefixes.
+    the resolver produces the link shape that test guarantees — a directory
+    link where ``resolve()`` on both sides yields equal prefixes. Junctions
+    resolve identically to symlinks, so the guard holds on Windows too.
     """
     _ = tmp_path  # unused — fake_pkg is the layout we need
     sibling_dist = _make_dist(fake_pkg.parent.parent.parent / "KiroCrewWebsite" / "dist")
