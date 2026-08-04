@@ -1,10 +1,11 @@
 import { useState, useCallback } from 'react'
-import { ExternalLink, Check, AlertTriangle } from 'lucide-react'
+import { ExternalLink, Check } from 'lucide-react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import { SettingsSection, SettingsCard, SettingsToggle, SettingsInput } from '../../components/settings'
 import { api } from '../../api/client'
 
 import { i18nT } from '../../i18n/t'
+import ErrorNotice from '../../components/ErrorNotice'
 type BrowserConfig = { extension_mode: boolean; token: boolean }
 
 export function BrowserPanel() {
@@ -124,12 +125,15 @@ export function BrowserPanel() {
                   {saveMut.isPending ? i18nT('pages.settings.browserPanel.saving') : i18nT('pages.settings.browserPanel.save')}
                 </button>
               </div>
-              {error && (
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6, color: 'var(--error)' }}>
-                  <AlertTriangle size={14} />
-                  <span style={{ fontSize: 12 }}>{error}</span>
-                </div>
-              )}
+              {/*
+                `askAgent={false}`: the only errors this banner shows come from
+                the save above, and the token being saved lives in local state
+                (`useState('')`, never persisted). Navigating to the chat would
+                unmount this panel and destroy the token the user just pasted out
+                of the Chrome extension — a re-fetch they cannot undo. The
+                message is shown; the hand-off is not worth that.
+              */}
+              <ErrorNotice message={error} variant="inline" askAgent={false} />
             </div>
           </SettingsCard>
         </SettingsSection>
