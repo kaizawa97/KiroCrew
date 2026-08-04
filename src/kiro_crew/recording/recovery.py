@@ -79,6 +79,17 @@ def register_meeting_store(store: MeetingStore) -> None:
     _store = store
 
 
+def get_meeting_store() -> Optional[MeetingStore]:
+    """The registered store, or ``None`` when no app has installed one.
+
+    Optional rather than raising, because the recording socket has a legitimate
+    unregistered path: a session with no ``meeting_id`` (dictation, a voice note)
+    persists nothing and needs no store. Recovery, which cannot work without one,
+    uses :func:`_require_store` instead.
+    """
+    return _store
+
+
 def _require_store() -> MeetingStore:
     if _store is None:
         raise RuntimeError(

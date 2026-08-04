@@ -4,6 +4,15 @@
 plus JSON control messages (start, pause, resume, stop), and emits ready,
 partial, final, level, and error events back to the client.
 
+``start`` takes an optional ``meeting_id``. When present, the recording's
+``audio.wav`` and ``transcript_local.json`` are written into that meeting's
+directory, resolved through the store an app registered (see
+:mod:`kiro_crew.recording.recovery`) -- this package is core and never turns a
+client-supplied id into a path itself. When the id cannot be placed the start is
+REFUSED, because a client that named a meeting expects a file at the end of it.
+When ``meeting_id`` is absent nothing is persisted, which is the dictation and
+voice-note case.
+
 Hardening mirrors ``stt_stream.py``:
 - Origin check (``check_origin(require=True)``)
 - Per-frame size caps (binary and text separately)
@@ -21,6 +30,7 @@ import json
 import logging
 import math
 import struct
+from pathlib import Path
 from typing import Optional
 
 from aiohttp import WSMsgType, web
@@ -28,6 +38,7 @@ from aiohttp import WSMsgType, web
 from kiro_crew.config.loader import KiroCrewConfig
 from kiro_crew.dashboard.origin import check_origin
 from kiro_crew.dashboard.urls import is_loopback
+from kiro_crew.recording.recovery import get_meeting_store
 from kiro_crew.recording.session import (
     InvalidTransitionError,
     RecordingSession,
@@ -146,6 +157,38 @@ def _compute_rms(pcm_data: bytes) -> float:
     sum_sq = sum(s * s for s in samples)
     rms = math.sqrt(sum_sq / n_samples) / 32768.0
     return min(1.0, rms)
+
+
+# ---------------------------------------------------------------------------
+# Storage resolution
+# ---------------------------------------------------------------------------
+
+
+def _resolve_storage_dir(meeting_id: str) -> Optional[Path]:
+    """Where this recording's files belong, or ``None`` if it cannot be placed.
+
+    This package is core and must not import an app, so the client-supplied
+    ``meeting_id`` is never turned into a path here. It is handed to the store an
+    app registered (see :mod:`kiro_crew.recording.recovery`), which owns the
+    validation and the containment check -- for Meetings that is
+    ``safe_meeting_id`` followed by ``contain``.
+
+    Every failure is ``None``: no store registered, an id the store rejected, or
+    an unwritable directory. Never raises, so a storage problem cannot take the
+    socket down with it.
+    """
+    store = get_meeting_store()
+    if store is None:
+        logger.warning(
+            "recording: meeting_id %r supplied but no meeting store is registered",
+            meeting_id[:120],
+        )
+        return None
+    try:
+        return store.resolve_meeting_dir(meeting_id)
+    except Exception:
+        logger.exception("recording: meeting store failed to resolve a directory")
+        return None
 
 
 # ---------------------------------------------------------------------------
@@ -313,7 +356,43 @@ async def api_ws_recording(request: web.Request) -> web.WebSocketResponse:
                             pass
                         continue
 
+                    # Optional: bind this recording to an app's meeting so the WAV
+                    # and live transcript land in that meeting's directory. Omitted
+                    # for a recording that persists nothing (dictation, a voice
+                    # note), which is why absent is allowed and empty is not.
+                    storage_dir: Optional[Path] = None
+                    raw_meeting_id = ctrl.get("meeting_id")
+                    if raw_meeting_id is not None:
+                        if not isinstance(raw_meeting_id, str) or not raw_meeting_id.strip():
+                            try:
+                                await ws.send_json(
+                                    {
+                                        "type": "error",
+                                        "message": "meeting_id must be a non-empty string",
+                                    }
+                                )
+                            except Exception:
+                                pass
+                            continue
+                        storage_dir = _resolve_storage_dir(raw_meeting_id)
+                        if storage_dir is None:
+                            # Refuse rather than record into the void. A client that
+                            # named a meeting expects a file at the end of it, and
+                            # starting anyway would produce a recording that silently
+                            # persisted nothing.
+                            try:
+                                await ws.send_json(
+                                    {
+                                        "type": "error",
+                                        "message": "recording storage unavailable",
+                                    }
+                                )
+                            except Exception:
+                                pass
+                            continue
+
                     session = RecordingSession(
+                        storage_dir=storage_dir,
                         title=ctrl.get("title", ""),
                         language=ctrl.get("language", "en"),
                     )
