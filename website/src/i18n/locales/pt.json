@@ -1299,6 +1299,7 @@
         "sysAudioCancelled": "Apenas o microfone está a ser gravado — o áudio da reunião não foi partilhado.",
         "sysAudioEnded": "A partilha do áudio da reunião terminou. O microfone continua a ser gravado.",
         "sysAudioNoAudio": "Esse ecrã não tem áudio. Partilhe o separador do navegador da reunião e ative o áudio para incluir os outros participantes.",
+        "sysAudioNoLoopback": "A aplicação de computador não consegue captar o áudio da reunião nesta plataforma. Abra o painel num navegador e partilhe o separador da reunião para incluir os outros participantes.",
         "sysAudioUnsupported": "Este navegador não consegue captar o áudio da reunião.",
         "taskAddFailed": "Não foi possível adicionar essa tarefa.",
         "taskFileFailed": "Não foi possível registar essa tarefa.",

@@ -45,7 +45,16 @@ const { findKirocrewBin } = require("./find-bin");
 const { findConfiguredDashboardPort } = require("./data-home");
 const { createTokenRetryHandler } = require("./token-retry");
 const { classifyAuthBlock, defaultedPort } = require("./gateway-auth-hint");
-const { createDisplayMediaHandler } = require("./display-media");
+const { createDisplayMediaHandler, describeAudioTier, USE_SYSTEM_PICKER } = require("./display-media");
+
+// Which system-audio tier this build can actually deliver. Constant for the
+// process (it depends only on the platform and the picker flag), and handed to the
+// renderer through `additionalArguments` because the preload is sandboxed and
+// cannot require this module itself — see the note at the top of preload.js.
+const AUDIO_TIER = describeAudioTier({
+  platform: process.platform,
+  useSystemPicker: USE_SYSTEM_PICKER,
+});
 const {
   createPermissionRequestHandler,
   createPermissionCheckHandler,
@@ -787,6 +796,9 @@ function setupWindowContents(win, backendUrl) {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
+      // The sandboxed preload cannot require our modules, so main-process-derived
+      // values are appended to the renderer's process.argv instead.
+      additionalArguments: [`--kirocrew-audio-tier=${AUDIO_TIER}`],
     },
   });
   view.setBackgroundColor("#00000000");
@@ -2004,6 +2016,13 @@ app.whenReady().then(async () => {
   // Chromium shows the OS picker natively). useSystemPicker uses macOS's native
   // screen picker when available; the desktopCapturer-backed handler is the
   // fallback for older macOS / other platforms.
+  //
+  // The handler also grants a loopback AUDIO device when the renderer asked for
+  // audio and the platform supports one, which is what lets a meeting capture the
+  // other participants (see display-media.js). Note the asymmetry this creates and
+  // that the renderer's guidance is derived from: when the native picker is used,
+  // Electron does not invoke this handler at all, so on macOS the picker decides
+  // whether audio is shared.
   session.defaultSession.setDisplayMediaRequestHandler(
     createDisplayMediaHandler({
       getSources: () => desktopCapturer.getSources({ types: ["screen", "window"] }),
@@ -2015,7 +2034,7 @@ app.whenReady().then(async () => {
         if (reason === "denied") showScreenPermissionDialog();
       },
     }),
-    { useSystemPicker: true },
+    { useSystemPicker: USE_SYSTEM_PICKER },
   );
 
   // Grant microphone access for the chat input's voice / speech-to-text

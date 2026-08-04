@@ -1362,6 +1362,7 @@
         "sysAudioCancelled": "Es wird nur das Mikrofon aufgezeichnet – Meeting-Audio wurde nicht freigegeben.",
         "sysAudioEnded": "Die Freigabe des Meeting-Audios wurde beendet. Das Mikrofon wird weiter aufgezeichnet.",
         "sysAudioNoAudio": "Dieser Bildschirm hat kein Audio. Geben Sie den Browser-Tab des Meetings frei und aktivieren Sie Audio, um die anderen Teilnehmer einzubeziehen.",
+        "sysAudioNoLoopback": "Die Desktop-App kann auf dieser Plattform kein Meeting-Audio erfassen. Öffnen Sie das Dashboard im Browser und geben Sie den Tab des Meetings frei, um die anderen Teilnehmer einzubeziehen.",
         "sysAudioUnsupported": "Dieser Browser kann kein Meeting-Audio erfassen.",
         "taskAddFailed": "Diese Aufgabe konnte nicht hinzugefügt werden.",
         "taskFileFailed": "Diese Aufgabe konnte nicht angelegt werden.",
