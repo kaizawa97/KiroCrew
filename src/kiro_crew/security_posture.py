@@ -305,6 +305,13 @@ _REDACTION_SINKS: tuple[tuple[str, str, str], ...] = (
         "before it is returned by the dashboard skills API, and again in-place "
         "before an approved candidate is promoted to the live skills dir.",
     ),
+    (
+        "Recording session transcription",
+        "recording/ws.py",
+        "Interim and finalized transcript events are redacted before emission to the "
+        "browser WebSocket — a partial displayed in the UI is an external surface even "
+        "though it is immediately replaced.",
+    ),
 )
 
 # Modules that call a redactor but are NOT an output egress boundary, so they do

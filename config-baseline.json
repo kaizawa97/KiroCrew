@@ -2074,6 +2074,36 @@
       "defaultValue": true
     },
     {
+      "path": "recording",
+      "kind": "core",
+      "type": "object",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Recording",
+      "help": "Recording session settings.",
+      "hasChildren": true,
+      "enumValues": null,
+      "defaultValue": {
+        "require_local_gateway": true
+      }
+    },
+    {
+      "path": "recording.require_local_gateway",
+      "kind": "core",
+      "type": "boolean",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Require Local Gateway",
+      "help": "Refuse to start a recording session when the Gateway is reachable on a non-loopback address. Disable explicitly for remote capture scenarios.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": true
+    },
+    {
       "path": "computer_use",
       "kind": "core",
       "type": "object",
@@ -4691,6 +4721,20 @@
       "tags": [],
       "label": "Description",
       "help": "Human-readable agent description.",
+      "hasChildren": false,
+      "enumValues": null,
+      "defaultValue": ""
+    },
+    {
+      "path": "agents.*.triggers",
+      "kind": "core",
+      "type": "string",
+      "required": false,
+      "deprecated": false,
+      "sensitive": false,
+      "tags": [],
+      "label": "Triggers",
+      "help": "Routing intent for orchestrator crew selection: free-text 'when to use this crew' guidance the main agent reads via select_crew. A crew with no triggers is not offered for selection.",
       "hasChildren": false,
       "enumValues": null,
       "defaultValue": ""
