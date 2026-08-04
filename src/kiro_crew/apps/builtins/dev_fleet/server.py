@@ -737,14 +737,41 @@ async def _run_cmd(
                 pass
 
 
+def _kill_tree_sync(pid: int) -> None:
+    """Kill *pid*'s group, then any descendant that escaped it.
+
+    The group kill alone is not sufficient: a descendant spawned with its own
+    session (``start_new_session`` / ``CREATE_NEW_PROCESS_GROUP``) sits in a
+    different process group, so POSIX ``killpg`` never reaches it. Sync/provision
+    run worktree-controlled build tooling that does exactly this, and an escaped
+    npm/vite keeps rewriting ``website/dist`` after the run is declared dead —
+    a later sync then stages a bundle a live writer is still mutating.
+
+    Descendants are enumerated FIRST: killing reparents survivors to init and
+    erases the PPID links that identify them. Each survivor is killed via its
+    own tree kill so a nested group (npm -> vite) goes down with it.
+    """
+
+    descendants = platform_compat.process_descendants(pid)
+    try:
+        platform_compat.kill_process_tree(pid)
+    except (ProcessLookupError, OSError, ValueError):
+        pass
+    for child in descendants:
+        try:
+            platform_compat.kill_process_tree(child)
+        except (ProcessLookupError, OSError, ValueError):
+            # Already reaped by the group kill, or a pid we may no longer
+            # signal — the primary kill has happened either way.
+            continue
+
+
 async def _kill_tree(pid: int) -> None:
-    """Kill a process tree without blocking the event loop (taskkill/killpg
+    """Kill a process tree without blocking the event loop (taskkill/killpg/ps
     are synchronous syscalls/subprocesses — run them on the executor)."""
     loop = asyncio.get_running_loop()
     try:
-        await loop.run_in_executor(
-            subprocess_executor(), platform_compat.kill_process_tree, pid
-        )
+        await loop.run_in_executor(subprocess_executor(), _kill_tree_sync, pid)
     except (ProcessLookupError, OSError):
         pass
 
@@ -2289,7 +2316,21 @@ async def _sync_start_locked() -> dict:
         ([git_bin, "merge", "--ff-only", f"{remote}/{BASE_BRANCH}"], "strict", _build_env(), "Pull"),
         ([str(target_py), "-m", "pip", "install", "-e", "."], "strict", _build_env(), "pip install"),
         ([npm_bin, "ci", "--prefix", "website"], "strict", _build_env(), "npm ci"),
-        ([npm_bin, "run", "build", "--prefix", "website"], "strict", _build_env(), "npm build"),
+        # Build and stage as ONE step, holding the staging lock across both.
+        # `npm run build` empties website/dist, so a peer flow (the dashboard's
+        # own update) staging concurrently would copy a partially written tree —
+        # and a bundle's lazy chunks are not reachable from index.html, so no
+        # post-hoc inspection of the copy can detect that reliably. Covering
+        # only the copy is not enough; the holder has to span the build.
+        # Runs under the TARGET repo's interpreter for the same reason as the
+        # pip step: its editable install is what resolves which checkout gets
+        # built and staged. npm's resolved trusted path is passed through rather
+        # than re-resolved inside.
+        ([str(target_py), "-c",
+          "import sys; from kiro_crew.frontend import build_and_stage; "
+          "sys.exit(0 if build_and_stage(npm=sys.argv[1]) else 1)",
+          npm_bin],
+         "strict", _build_env(), "npm build + stage"),
     ]
     cleanups: list[str] = []
     wrapped_steps: list[dict] = []

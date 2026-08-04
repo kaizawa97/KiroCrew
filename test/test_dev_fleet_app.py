@@ -2881,9 +2881,10 @@ async def test_sync_build_steps_never_see_credential_helpers(monkeypatch):
     build_envs = [
         e for a, e in captured
         if _base(a) == ["git", "merge"] or "pip" in a or Path(a[0]).name == "npm"
+        or any("build_and_stage" in str(x) for x in a)
     ]
     assert fetch_envs and all(key in e for e in fetch_envs)
-    assert len(build_envs) == 4  # merge + pip + npm ci + npm build
+    assert len(build_envs) == 4  # merge + pip + npm ci + (npm build + stage)
     assert all(key not in e for e in build_envs)
 
 
@@ -4753,3 +4754,126 @@ def test_declared_platforms_all_resolve_to_a_real_sys_platform():
     cfg = PlatformConfig(os=manifest["platform"]["os"])
     for sys_platform in ("darwin", "linux", "win32"):
         assert cfg.supports_platform(sys_platform), sys_platform
+
+
+@pytest.mark.asyncio
+async def test_sync_builds_and_stages_under_one_lock_holder(monkeypatch, tmp_path):
+    """Pull+Build must build and stage inside ONE locked step.
+
+    Without a staging step the live gateway keeps serving through the symlink
+    ensure_dev_dist_symlink() points at ``website/dist``, so the build empties
+    and rewrites the assets it is serving. Staging must also run under the
+    TARGET repo's interpreter, since its editable install decides which
+    checkout gets staged.
+    """
+    repo = tmp_path / "mainrepo"
+    (repo / ".venv" / "bin").mkdir(parents=True)
+    (repo / ".venv" / "bin" / "python").write_text("")
+    monkeypatch.setattr(mod, "MAIN_REPO", str(repo))
+    monkeypatch.setattr(mod, "_SYNC_RID", None)
+
+    async def fake_remote():
+        return "origin"
+
+    monkeypatch.setattr(mod, "_upstream_remote", fake_remote, raising=False)
+    monkeypatch.setattr(mod, "_trusted_bin", lambda n: f"/usr/bin/{n}")
+    argvs: list[list[str]] = []
+
+    def fake_sandboxed(argv, mode, env=None):
+        argvs.append(list(argv))
+        return list(argv), dict(env or {}), None
+
+    monkeypatch.setattr(mod, "sandboxed_spawn_argv", fake_sandboxed)
+
+    async def fake_run_cmd(cmd, **kw):
+        return 0, "main", ""
+
+    monkeypatch.setattr(mod, "_run_cmd", fake_run_cmd)
+
+    async def fake_start_run(label, cmd, **kw):
+        return "rid-stage"
+
+    monkeypatch.setattr(mod, "_start_run", fake_start_run)
+
+    res = await mod._sync_start_locked()
+    assert res.get("ok"), res
+
+    def _index(pred) -> int:
+        for i, a in enumerate(argvs):
+            if pred(a):
+                return i
+        raise AssertionError(f"step not found in {argvs}")
+
+    # Build and stage are ONE step so a single lock holder spans both: the build
+    # empties website/dist, and a peer flow staging concurrently would copy a
+    # partially written tree.
+    stage_i = _index(lambda a: any("build_and_stage" in x for x in a))
+    assert argvs[stage_i][0] == str(repo / ".venv" / "bin" / "python")
+    assert argvs[stage_i][-1].endswith("npm"), "the trusted npm path is passed through"
+    assert not any(
+        a[1:] == ["run", "build", "--prefix", "website"] for a in argvs
+    ), "a separate unlocked npm build step would reintroduce the race"
+    # npm ci does not touch website/dist, so it stays its own step.
+    ci_i = _index(lambda a: a[1:] == ["ci", "--prefix", "website"])
+    assert ci_i < stage_i
+
+
+def test_kill_tree_reaps_a_descendant_that_escaped_the_process_group():
+    """A new-session descendant is outside the group, so killpg alone misses it."""
+    from kiro_crew.apps.builtins.dev_fleet import server as dev
+
+    killed: list[int] = []
+
+    with patch.object(dev.platform_compat, "process_descendants", return_value=[222]), \
+            patch.object(
+                dev.platform_compat,
+                "kill_process_tree",
+                side_effect=lambda pid, *a, **k: killed.append(pid) or True,
+            ):
+        dev._kill_tree_sync(111)
+
+    assert killed == [111, 222], (
+        "the group kill must run first, then each escaped descendant"
+    )
+
+
+def test_kill_tree_enumerates_descendants_before_killing_anything():
+    """Ordering is the whole mechanism.
+
+    A kill reparents survivors to init and erases the PPID links, so a snapshot
+    taken after the kill cannot see the processes that escaped.
+    """
+    from kiro_crew.apps.builtins.dev_fleet import server as dev
+
+    events: list[str] = []
+
+    with patch.object(
+        dev.platform_compat,
+        "process_descendants",
+        side_effect=lambda pid: events.append("enumerate") or [222],
+    ), patch.object(
+        dev.platform_compat,
+        "kill_process_tree",
+        side_effect=lambda pid, *a, **k: events.append(f"kill{pid}") or True,
+    ):
+        dev._kill_tree_sync(111)
+
+    assert events[0] == "enumerate", f"enumeration must precede any kill: {events}"
+    assert events == ["enumerate", "kill111", "kill222"]
+
+
+def test_kill_tree_survives_an_already_dead_descendant():
+    """The group kill usually reaps descendants; a dead pid must not raise."""
+    from kiro_crew.apps.builtins.dev_fleet import server as dev
+
+    def _kill(pid, *a, **k):
+        if pid == 222:
+            raise ProcessLookupError(pid)
+        return True
+
+    with patch.object(dev.platform_compat, "process_descendants", return_value=[222, 333]), \
+            patch.object(dev.platform_compat, "kill_process_tree", side_effect=_kill) as km:
+        dev._kill_tree_sync(111)
+
+    # 333 is still attempted after 222's ProcessLookupError.
+    assert [c.args[0] for c in km.call_args_list] == [111, 222, 333]
