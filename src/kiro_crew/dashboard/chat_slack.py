@@ -9,11 +9,12 @@ from aiohttp import web
 from kiro_crew.config.loader import KiroCrewConfig
 from kiro_crew.dashboard import state as dashboard_state
 from kiro_crew.dashboard.chat_persistence import save_slot_off_loop
-from kiro_crew.dashboard.chat_utils import effective_session_key
+from kiro_crew.dashboard.chat_utils import effective_session_key, remember_slack_options
 from kiro_crew.dashboard.state import DashboardState
 from kiro_crew.security import redact_and_truncate
 from kiro_crew.sel import sel
 from kiro_crew.slack.channel_resolver import _CACHE_FILENAME, ChannelNameResolver
+from kiro_crew.slack.outbound import post_assistant_text, post_plain_text
 from kiro_crew.sync_bridge import handoff_to_slack
 
 logger = logging.getLogger(__name__)
@@ -119,26 +120,62 @@ async def api_chat_slot_slack_link(request: web.Request) -> web.Response:
         if not thread_ts:
             return web.json_response({"error": "failed to create thread"}, status=500)
 
-    state.sessions.set_slack_link(session_key, thread_ts, target_channel)
-    slot._slack_linked = True
-    slot._slack_channel = target_channel
-    slot._slack_thread_ts = thread_ts
+    # Register the link through the state helper rather than assigning the slot's
+    # fields directly. It also writes the thread -> slot reverse index, which is
+    # what resolves a Slack interaction back to this conversation — without it an
+    # OPTIONS click on the replayed control below would not find this slot and
+    # would answer into a separate Slack session. It additionally evicts a stale
+    # mapping if this slot was linked elsewhere, and releases the thread from a
+    # previous owner, keeping one thread bound to one conversation.
+    state.link_slack(name, thread_ts, target_channel)
 
     # Post last 5 messages as context — only when we created a NEW thread.
     # Linking to an existing thread (challenge-and-redirect) would duplicate
     # messages the thread already contains.
     if not existing_thread:
-        for m in slot.messages[-5:]:
+        # Filter to displayable turns BEFORE slicing: the transcript also holds
+        # rows that are never replayed (queue-cycle markers and other system
+        # entries), and a trailing one of those would otherwise make the last
+        # real reply look superseded and render its choices spent.
+        recent = [
+            m
+            for m in slot.messages
+            if m.get("role") in ("user", "assistant") and (m.get("content") or "")
+        ][-5:]
+        for idx, m in enumerate(recent):
             role = m.get("role", "")
-            txt = redact_and_truncate(m.get("content") or "", max_chars=2000)
-            if role in ("user", "assistant") and txt:
-                icon = "\U0001f9d1" if role == "user" else "\U0001f916"
-                try:
-                    await state.slack_client.post_message(
-                        target_channel, f"{icon} {txt}", thread_ts
+            content = m.get("content") or ""
+            icon = "\U0001f9d1" if role == "user" else "\U0001f916"
+            # Only the newest message may carry a live OPTIONS control, and only
+            # when it is the assistant's: an earlier one asked a question this
+            # replay has already moved past, so its choices render struck
+            # through rather than inviting an answer to a stale question.
+            is_newest_reply = role == "assistant" and idx == len(recent) - 1
+            try:
+                if role == "assistant":
+                    posted = await post_assistant_text(
+                        state.slack_client,
+                        target_channel,
+                        f"{icon} {content}",
+                        thread_ts,
+                        interactive=is_newest_reply,
+                        truncate_to=2000,
                     )
-                except Exception:
-                    pass
+                    remember_slack_options(state, session_key, posted)
+                else:
+                    # A person's own words are not agent output: a trailing
+                    # OPTIONS tag in them is literal text they typed, so it must
+                    # survive the replay rather than being parsed into choices
+                    # they never offered.
+                    await post_plain_text(
+                        state.slack_client,
+                        target_channel,
+                        f"{icon} {content}",
+                        thread_ts,
+                        truncate_to=2000,
+                    )
+            except Exception:
+                logger.debug("Failed to backfill message into Slack thread", exc_info=True)
 
     sel().log_api_access(
         caller="dashboard",
@@ -189,6 +226,10 @@ async def api_chat_slot_slack_unlink(request: web.Request) -> web.Response:
     slot._slack_linked = False
     slot._slack_channel = ""
     slot._slack_thread_ts = ""
+    # Drop the thread -> slot reverse index too, or the thread keeps resolving to
+    # this conversation after the link is gone.
+    if prev_thread_ts:
+        state._slack_to_slot.pop(prev_thread_ts, None)
 
     # Best-effort courtesy note so a Slack watcher knows why the thread went
     # quiet. Same redaction path as the link endpoint; failure is non-fatal.
