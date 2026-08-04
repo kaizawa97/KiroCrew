@@ -7448,7 +7448,11 @@
         "step_installing_whisper": "Установка whisper (~1,6 ГБ)...",
         "step_installing_xcode": "Установка Xcode CLI Tools...",
         "step_pulling": "Загрузка образа Docker...",
-        "step_starting": "Запуск..."
+        "step_starting": "Запуск...",
+        "provider_faster": "faster-whisper (локально — без ffmpeg)",
+        "install_faster_whisper": "Установить faster-whisper",
+        "installs_faster_whisper_no_ffmpeg_needed": "Устанавливает faster-whisper через pip. ffmpeg не нужен. Недоступно в Windows on ARM.",
+        "step_installing_faster": "Установка faster-whisper..."
       },
       "teamsPanel": {
         "above_unlike_slack_the_bot_framework_has_no_outb": "выше. В отличие от Slack, у Bot Framework нет\n              режима только для исходящих сообщений.",

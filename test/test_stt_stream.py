@@ -774,11 +774,15 @@ class TestSttProviderGating:
         monkeypatch.setattr("subprocess.run", fake_run)
         assert core._is_apple_silicon() is False
 
+    # Both lists below are exact on purpose: they pin ORDER as well as membership,
+    # since the dashboard renders them in this sequence. They must track
+    # ``_VALID_STT_PROVIDERS`` in the config loader — adding a provider there
+    # deliberately fails these until the expectation is updated too.
     def test_providers_include_mlx_on_apple_silicon(self, monkeypatch):
         from kiro_crew.dashboard.handlers import core
 
         monkeypatch.setattr(core, "_is_apple_silicon", lambda: True)
-        assert core._stt_providers() == ["whisper", "mlx", "transcribe"]
+        assert core._stt_providers() == ["whisper", "mlx", "transcribe", "faster"]
 
     def test_providers_exclude_mlx_off_apple_silicon(self, monkeypatch):
         from kiro_crew.dashboard.handlers import core
@@ -786,7 +790,7 @@ class TestSttProviderGating:
         monkeypatch.setattr(core, "_is_apple_silicon", lambda: False)
         providers = core._stt_providers()
         assert "mlx" not in providers
-        assert providers == ["whisper", "transcribe"]
+        assert providers == ["whisper", "transcribe", "faster"]
 
     def test_mlx_prereqs_empty_when_brew_present(self, monkeypatch):
         """The Install button installs ffmpeg/pipx/mlx-whisper, so when brew is

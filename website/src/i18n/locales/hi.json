@@ -7296,7 +7296,11 @@
         "step_installing_whisper": "whisper इंस्टॉल हो रहा है (~1.6 GB)…",
         "step_installing_xcode": "Xcode CLI Tools इंस्टॉल हो रहे हैं…",
         "step_pulling": "Docker इमेज लाई जा रही है…",
-        "step_starting": "शुरू हो रहा है…"
+        "step_starting": "शुरू हो रहा है…",
+        "provider_faster": "faster-whisper (स्थानीय — ffmpeg की ज़रूरत नहीं)",
+        "install_faster_whisper": "faster-whisper इंस्टॉल करें",
+        "installs_faster_whisper_no_ffmpeg_needed": "pip के ज़रिए faster-whisper इंस्टॉल करता है। ffmpeg की ज़रूरत नहीं। Windows on ARM पर उपलब्ध नहीं है।",
+        "step_installing_faster": "faster-whisper इंस्टॉल हो रहा है…"
       },
       "teamsPanel": {
         "above_unlike_slack_the_bot_framework_has_no_outb": "ऊपर। Slack के विपरीत, Bot Framework में कोई\n              केवल-आउटबाउंड मोड नहीं है।",
