@@ -89,6 +89,19 @@ SESSION_META_FILE = "session.json"
 TASKS_FILE = "tasks.json"
 TRANSLATIONS_FILE = "translations.json"
 
+#: The user's own note for a meeting, inside the meeting directory.
+#:
+#: **The leading underscore is load-bearing, not decoration.** Agent output files
+#: share this directory and their names are derived as
+#: ``safe_agent_id(id) + WIDGET_EXT_MAP[widget_type]``. ``_SAFE_AGENT_ID_RE`` is
+#: ``^[a-z0-9][a-z0-9-]*$``, which cannot produce a leading underscore — so no
+#: configured agent, whatever the user names it, can ever be handed this path as
+#: its ``OUTPUT_FILE`` and overwrite what the user wrote. ``note.md`` and
+#: ``notes.md`` are both reachable that way (``note`` and ``notes`` are legal agent
+#: ids), which is why neither is used. Pinned by
+#: ``test_note_filename_is_unreachable_by_any_agent``.
+NOTE_FILE = "_note.md"
+
 # The always-on system agent that maintains ``tasks.json``. Not a configurable
 # entry in ``meeting_agents`` — it is a core feature of the app.
 TASK_EXTRACTOR_ID = "task-extractor"
@@ -173,3 +186,10 @@ MAX_TRANSLATION_BACKLOG = 40
 #: Trimmed from the front when exceeded. Line numbers stay monotonic, so a client
 #: polling with ``since`` is unaffected by trimming — it only loses scroll-back.
 MAX_TRANSLATION_LINES = 2000
+
+# ── notes ───────────────────────────────────────────────────────────────────
+
+#: Ceiling on a meeting note. Generous — this is a human typing for at most the
+#: four hours ``MAX_SESSION_DURATION`` allows — but bounded, because the note is
+#: written by a request body and read back into a poll response.
+MAX_NOTE_CHARS = 100_000

@@ -405,6 +405,56 @@ def write_tasks(meeting_id: str, tasks: list[dict[str, Any]], root: Path | None 
     return doc
 
 
+# ── the user's own note ─────────────────────────────────────────────────────
+
+
+def note_path(meeting_id: str, root: Path | None = None) -> Path:
+    """Where the user's note for a meeting lives, containment-checked.
+
+    See :data:`constants.NOTE_FILE` for why the filename starts with an
+    underscore: it is the property that makes the file un-ownable by any agent.
+    """
+    return contain(
+        meeting_dir(meeting_id, root) / k.NOTE_FILE,
+        operation="meetings.note",
+        root=root,
+    )
+
+
+def read_note(meeting_id: str, root: Path | None = None) -> dict[str, Any]:
+    """The note's text and mtime, or empty strings when there is none. BLOCKING.
+
+    A missing file is the normal first state, not an error — every meeting starts
+    without a note.
+    """
+    path = note_path(meeting_id, root)
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
+        return {"content": "", "updated_at": ""}
+    try:
+        mtime = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(path.stat().st_mtime))
+    except OSError:  # pragma: no cover — raced with a delete
+        mtime = ""
+    return {"content": content, "updated_at": mtime}
+
+
+def write_note(meeting_id: str, content: str, root: Path | None = None) -> dict[str, Any]:
+    """Replace the note's text. BLOCKING.
+
+    A whole-file replace, and deliberately NOT under ``meta_transaction()``: there
+    is no read-modify-write to protect, and ``atomic_write`` already makes the
+    replacement all-or-nothing. Two browser tabs editing one note is therefore
+    last-write-wins — the same semantics a text editor has, and the honest one for
+    a single user's own memo. Adding an optimistic-concurrency token would trade a
+    conflict dialog for a race nobody is losing data to.
+    """
+    path = note_path(meeting_id, root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(path, content)
+    return read_note(meeting_id, root)
+
+
 # ── live translation ────────────────────────────────────────────────────────
 
 

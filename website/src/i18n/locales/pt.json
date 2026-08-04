@@ -1222,7 +1222,8 @@
         "stopRecording": "Parar a gravação",
         "toggleTasks": "Tarefas",
         "unpause": "Retomar",
-        "toggleTranslation": "Tradução"
+        "toggleTranslation": "Tradução",
+        "toggleNote": "Nota"
       },
       "pillBar": {
         "addLink": "Adicionar um link",
@@ -1305,7 +1306,8 @@
         "taskAddFailed": "Não foi possível adicionar essa tarefa.",
         "taskFileFailed": "Não foi possível registar essa tarefa.",
         "taskFiled": "Tarefa registada.",
-        "untitled": "Reunião sem título"
+        "untitled": "Reunião sem título",
+        "noteSaveFailed": "Não foi possível guardar a sua nota."
       },
       "settings": {
         "addTerm": "Adicionar",
@@ -1371,6 +1373,16 @@
         "lineFailed": "Não foi possível traduzir esta linha.",
         "pending": "A recuperar…",
         "dropped": "Algumas linhas foram ignoradas para acompanhar o ritmo."
+      },
+      "note": {
+        "title": "A minha nota",
+        "close": "Fechar a nota",
+        "placeholder": "Escreva aqui as suas notas. O Markdown é suportado.",
+        "saving": "A guardar…",
+        "unsaved": "Alterações não guardadas",
+        "saved": "Guardada",
+        "hint": "É guardada automaticamente enquanto escreve.",
+        "editorLabel": "Texto da nota"
       }
     },
     "papyrus": {

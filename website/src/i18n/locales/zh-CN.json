@@ -1194,7 +1194,8 @@
         "stopRecording": "停止录制",
         "toggleTasks": "行动项",
         "unpause": "继续",
-        "toggleTranslation": "翻译"
+        "toggleTranslation": "翻译",
+        "toggleNote": "笔记"
       },
       "pillBar": {
         "addLink": "添加链接",
@@ -1273,7 +1274,8 @@
         "taskAddFailed": "无法添加该行动项。",
         "taskFileFailed": "无法提交该行动项。",
         "taskFiled": "行动项已提交。",
-        "untitled": "未命名会议"
+        "untitled": "未命名会议",
+        "noteSaveFailed": "无法保存你的笔记。"
       },
       "settings": {
         "addTerm": "添加",
@@ -1337,6 +1339,16 @@
         "lineFailed": "无法翻译这一行。",
         "pending": "正在追赶…",
         "dropped": "为了跟上进度，已跳过部分内容。"
+      },
+      "note": {
+        "title": "我的笔记",
+        "close": "关闭笔记",
+        "placeholder": "在此记下你自己的笔记。支持 Markdown。",
+        "saving": "正在保存…",
+        "unsaved": "有未保存的更改",
+        "saved": "已保存",
+        "hint": "输入时自动保存。",
+        "editorLabel": "笔记内容"
       }
     },
     "papyrus": {

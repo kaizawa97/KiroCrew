@@ -902,7 +902,8 @@
         "stopRecording": "Stop recording",
         "toggleTasks": "Action items",
         "unpause": "Resume",
-        "toggleTranslation": "Translation"
+        "toggleTranslation": "Translation",
+        "toggleNote": "Note"
       },
       "pillBar": {
         "addLink": "Add a link",
@@ -983,7 +984,8 @@
         "taskAddFailed": "Could not add that action item.",
         "taskFileFailed": "Could not file that action item.",
         "taskFiled": "Action item filed.",
-        "untitled": "Untitled meeting"
+        "untitled": "Untitled meeting",
+        "noteSaveFailed": "Could not save your note."
       },
       "settings": {
         "addTerm": "Add",
@@ -1048,6 +1050,16 @@
         "lineFailed": "Could not translate this line.",
         "pending": "Catching up…",
         "dropped": "Some lines were skipped to keep up."
+      },
+      "note": {
+        "title": "My note",
+        "close": "Close note",
+        "placeholder": "Type your own notes here. Markdown works.",
+        "saving": "Saving…",
+        "unsaved": "Unsaved changes",
+        "saved": "Saved",
+        "hint": "Saves automatically as you type.",
+        "editorLabel": "Note text"
       }
     },
     "papyrus": {

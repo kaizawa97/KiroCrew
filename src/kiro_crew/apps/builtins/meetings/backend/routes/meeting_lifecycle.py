@@ -408,6 +408,52 @@ async def handle_get_outputs(request: web.Request) -> web.Response:
     return web.json_response({"outputs": outputs, "tasks": tasks})
 
 
+async def handle_get_note(request: web.Request) -> web.Response:
+    """The user's own note for a meeting."""
+    meeting_id = _meeting_id(request)
+    root = data_root(request)
+    note = await asyncio.to_thread(store.read_note, meeting_id, root)
+    return web.json_response(note)
+
+
+async def handle_put_note(request: web.Request) -> web.Response:
+    """Replace the user's note for a meeting.
+
+    Deliberately NOT redacted, unlike every other text this app accepts. The
+    others are transcript or attachment metadata — untrusted input on its way to
+    an agent's context — whereas this is the user's own writing on its way back to
+    only themselves. Scrubbing what someone typed into their own memo would
+    silently corrupt it, and the note is never fed to an agent (agents are told
+    about their own output files and ``tasks.json``, not this one). It renders
+    through the dashboard's shared markdown sanitizer, which is what makes the
+    round-trip safe without altering the text.
+    """
+    meeting_id = _meeting_id(request)
+    root = data_root(request)
+    body = await json_body(request)
+
+    # Validated by hand rather than with `field_str`, which would be the natural
+    # choice here and is wrong for a note in two ways:
+    #
+    # 1. It treats a non-string as MISSING and returns the default — so a malformed
+    #    request would come back 200 having silently erased the user's memo. A note
+    #    is the one thing in this app the user cannot regenerate, so a bad body must
+    #    be refused, not applied.
+    # 2. It `strip()`s. Leading and trailing whitespace is part of what someone
+    #    typed (a trailing blank line under a list, an indented block), and quietly
+    #    rewriting it on every autosave would make the field feel broken.
+    #
+    # An EMPTY string is still accepted: deleting everything is a legitimate edit.
+    content = body.get("content")
+    if not isinstance(content, str):
+        raise BadRequest("content must be a string")
+    if len(content) > k.MAX_NOTE_CHARS:
+        raise BadRequest(f"content must be at most {k.MAX_NOTE_CHARS} characters")
+
+    note = await asyncio.to_thread(store.write_note, meeting_id, content, root)
+    return web.json_response({"ok": True, **note})
+
+
 def _read_translations_since(meeting_id: str, since: int, root: Any) -> dict[str, Any]:
     """Translated lines with ``n >= since``, plus the cursor to ask for next. BLOCKING."""
     doc = store.read_translations(meeting_id, root)

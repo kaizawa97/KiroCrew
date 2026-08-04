@@ -1287,7 +1287,8 @@
         "stopRecording": "Aufzeichnung beenden",
         "toggleTasks": "Aufgaben",
         "unpause": "Fortsetzen",
-        "toggleTranslation": "Übersetzung"
+        "toggleTranslation": "Übersetzung",
+        "toggleNote": "Notiz"
       },
       "pillBar": {
         "addLink": "Link hinzufügen",
@@ -1368,7 +1369,8 @@
         "taskAddFailed": "Diese Aufgabe konnte nicht hinzugefügt werden.",
         "taskFileFailed": "Diese Aufgabe konnte nicht angelegt werden.",
         "taskFiled": "Aufgabe angelegt.",
-        "untitled": "Besprechung ohne Titel"
+        "untitled": "Besprechung ohne Titel",
+        "noteSaveFailed": "Ihre Notiz konnte nicht gespeichert werden."
       },
       "settings": {
         "addTerm": "Hinzufügen",
@@ -1433,6 +1435,16 @@
         "lineFailed": "Diese Zeile konnte nicht übersetzt werden.",
         "pending": "Wird aufgeholt…",
         "dropped": "Einige Zeilen wurden übersprungen, um mitzuhalten."
+      },
+      "note": {
+        "title": "Meine Notiz",
+        "close": "Notiz schließen",
+        "placeholder": "Schreiben Sie hier Ihre eigenen Notizen. Markdown wird unterstützt.",
+        "saving": "Wird gespeichert…",
+        "unsaved": "Nicht gespeicherte Änderungen",
+        "saved": "Gespeichert",
+        "hint": "Wird beim Schreiben automatisch gespeichert.",
+        "editorLabel": "Notiztext"
       }
     },
     "papyrus": {

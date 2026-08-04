@@ -66,6 +66,12 @@ export interface MeetingsConfig {
   translation_language: string
 }
 
+/** The user's own note for a meeting. `updated_at` is `''` before the first save. */
+export interface MeetingNote {
+  content: string
+  updated_at: string
+}
+
 /** One translated transcript line. `text` is `''` when the translation failed. */
 export interface TranslationLine {
   n: number
@@ -262,6 +268,13 @@ export const meetingsApi = {
     request<{ outputs: Record<string, string>; tasks: Task[] }>(
       `/meetings/${encodeURIComponent(id)}/outputs`,
     ),
+  note: (id: string) =>
+    request<MeetingNote>(`/meetings/${encodeURIComponent(id)}/note`),
+  saveNote: (id: string, content: string) =>
+    request<{ ok: boolean } & MeetingNote>(`/meetings/${encodeURIComponent(id)}/note`, {
+      method: 'PUT',
+      body: JSON.stringify({ content }),
+    }),
   /**
    * Translated lines newer than `since`. Cursor-based rather than full-document:
    * the panel polls while it is open and a long meeting accumulates hundreds of

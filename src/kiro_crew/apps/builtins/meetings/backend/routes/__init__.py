@@ -206,6 +206,10 @@ def register_routes(app: web.Application) -> None:
         BASE + "/meetings/{meeting_id}/translations",
         route(lifecycle_routes.handle_get_translations),
     )
+    # The user's own note. A GET/PUT pair rather than a PATCH: the body is the
+    # whole note, so there is no partial update to express.
+    router.add_get(BASE + "/meetings/{meeting_id}/note", route(lifecycle_routes.handle_get_note))
+    router.add_put(BASE + "/meetings/{meeting_id}/note", route(lifecycle_routes.handle_put_note))
     router.add_post(
         BASE + "/meetings/{meeting_id}/attachments",
         route(lifecycle_routes.handle_attachments),

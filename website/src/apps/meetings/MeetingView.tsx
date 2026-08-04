@@ -13,6 +13,7 @@ import {
   Mic,
   MicOff,
   MonitorSpeaker,
+  NotebookPen,
   Play,
   RefreshCw,
   Square,
@@ -24,6 +25,7 @@ import type { MeetingsConfig } from './api'
 import AgentPanel from './components/AgentPanel'
 import AgentPillBar from './components/AgentPillBar'
 import BroadcastBar from './components/BroadcastBar'
+import NoteSidebar from './components/NoteSidebar'
 import RecordingMeter from './components/RecordingMeter'
 import TaskSidebar from './components/TaskSidebar'
 import TranslationSidebar from './components/TranslationSidebar'
@@ -72,6 +74,7 @@ export default function MeetingView({
     recording,
     systemAudio,
     translation,
+    note,
   } = session
 
   if (loading) return <Skeleton className="h-40 m-6" />
@@ -228,6 +231,14 @@ export default function MeetingView({
             >
               <RefreshCw className={`lucide-inline ${syncing ? 'animate-spin' : ''}`} />
             </Btn>
+            <Btn
+              onClick={() => session.setNoteOpen(open => !open)}
+              aria-label={i18nT('apps.meetings.meeting.toggleNote')}
+              title={i18nT('apps.meetings.meeting.toggleNote')}
+              aria-pressed={note.open}
+            >
+              <NotebookPen className="lucide-inline" />
+            </Btn>
             {/* Offered only when a target language is configured: with translation
                 off (the default) the button would open a panel that can never fill.
                 Settings is where it gets turned on. */}
@@ -320,6 +331,16 @@ export default function MeetingView({
           <BroadcastBar onSend={actions.broadcast} caption={caption} />
         )}
       </div>
+
+      {note.open && (
+        <NoteSidebar
+          content={note.content}
+          updatedAt={note.updatedAt}
+          saving={note.saving}
+          onSave={session.saveNote}
+          onClose={() => session.setNoteOpen(false)}
+        />
+      )}
 
       {translation.open && translation.language && (
         <TranslationSidebar
