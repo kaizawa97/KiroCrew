@@ -27,6 +27,7 @@ from kiro_crew.apps.builtins.meetings.backend import constants as k
 from kiro_crew.apps.builtins.meetings.backend import recording_store, store
 from kiro_crew.apps.builtins.meetings.backend.domain import session as sess
 from kiro_crew.apps.builtins.meetings.backend.routes import agents as agents_routes
+from kiro_crew.apps.builtins.meetings.backend.routes import audio_import as import_routes
 from kiro_crew.apps.builtins.meetings.backend.routes import calendar as calendar_routes
 from kiro_crew.apps.builtins.meetings.backend.routes import meeting_lifecycle as lifecycle_routes
 from kiro_crew.apps.builtins.meetings.backend.routes import settings as settings_routes
@@ -243,6 +244,12 @@ def register_routes(app: web.Application) -> None:
     )
     router.add_post(
         BASE + "/meetings/{meeting_id}/reset", route(agents_routes.handle_reset_agents)
+    )
+
+    # Import an existing recording. A transcript PRODUCER, like /dispatch — it needs a
+    # live meeting for the same reason, and shares `_common.live_session`.
+    router.add_post(
+        BASE + "/meetings/{meeting_id}/import", route(import_routes.handle_import_audio)
     )
 
     # Tasks

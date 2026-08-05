@@ -24,10 +24,33 @@ All paths are under `~/.kiro/crew/apps/meetings/data/`:
 | `meetings/<id>/tasks.json` | that meeting's extracted action items |
 | `meetings/<id>/<agent-id>.md` | a markdown agent's output (e.g. `note-taker.md`) |
 | `meetings/<id>/<agent-id>.html` | an HTML agent's output (e.g. `sketch-artist.html`) |
+| `meetings/<id>/translations.json` | live translation of the transcript, for the UI panel |
+| `meetings/<id>/audio.wav` | the meeting recording |
 
 `<id>` is the meeting id with `:` replaced by `_`. Only `[A-Za-z0-9._-]` is
 legal in it — the backend rejects anything else, so do not construct a path from
 a raw calendar UID.
+
+### Paths that are the user's, not yours
+
+Three things in a meeting folder belong to the person, and an agent must **never
+read or write them** — not to tidy them, not to merge them, not to quote them:
+
+| Path | What it is |
+|---|---|
+| `meetings/<id>/_note.md` | the user's own memo, with their own thoughts in it |
+| `meetings/<id>/images/*` | screenshots they pasted into that memo |
+| `meetings/<id>/edits/<agent-id>.md` | **their correction of your output** |
+
+The last one matters most to you. When a user edits your minutes, their version
+goes there and is what the app shows them from then on; your own file is left
+exactly as you wrote it. So keep rewriting your own file normally — that is the
+design, and it is why their correction cannot be lost. But do not go looking for
+`edits/` to "reconcile" with, and never write into it: overwriting a correction is
+the one failure this layout exists to make impossible.
+
+They are listed here so you recognise them and leave them alone, not so you can
+find them.
 
 ## Lifecycle
 

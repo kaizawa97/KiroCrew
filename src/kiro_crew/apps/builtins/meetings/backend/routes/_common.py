@@ -24,7 +24,10 @@ from aiohttp import web
 
 from kiro_crew.apps.builtins.meetings.backend import constants as k
 from kiro_crew.apps.builtins.meetings.backend import store
-from kiro_crew.apps.builtins.meetings.backend.domain.session import MeetingSession
+from kiro_crew.apps.builtins.meetings.backend.domain.session import (
+    MeetingSession,
+    end_meeting_meta,
+)
 from kiro_crew.apps.manager import is_app_enabled
 from kiro_crew.hooks import get_global_hook_store  # noqa: F401  (re-export for handlers)
 from kiro_crew.sel import sel
@@ -319,6 +322,13 @@ def error_response(exc: Exception) -> web.Response:
     # (it cannot statically tell the response is even an error) and a hoisted `body`
     # variable as `opaque_body` (it cannot see the `code` inside). Only the literal
     # form proves the contract is met, so the repetition buys a checkable guarantee.
+    # FORBIDDEN was MISSING until the audio-import route needed it, and its absence
+    # was a live bug rather than a gap: `store.contain` raises
+    # `MeetingsPathError(..., status=403)` for a path that escapes the data root, and
+    # without this branch that answered **400**. A containment violation reported as
+    # "bad request" reads like a typo the caller can fix by retrying.
+    if exc.status == HTTPStatus.FORBIDDEN:
+        return web.json_response({"error": str(exc), "code": exc.code}, status=403)
     if exc.status == HTTPStatus.NOT_FOUND:
         return web.json_response({"error": str(exc), "code": exc.code}, status=404)
     if exc.status == HTTPStatus.CONFLICT:
@@ -327,6 +337,12 @@ def error_response(exc: Exception) -> web.Response:
         return web.json_response({"error": str(exc), "code": exc.code}, status=410)
     if exc.status == HTTPStatus.REQUEST_ENTITY_TOO_LARGE:
         return web.json_response({"error": str(exc), "code": exc.code}, status=413)
+    # 502/503 both mean "your request was fine, the thing behind it was not", which is
+    # a distinction the client acts on: retry later, versus fix the configuration.
+    if exc.status == HTTPStatus.BAD_GATEWAY:
+        return web.json_response({"error": str(exc), "code": exc.code}, status=502)
+    if exc.status == HTTPStatus.SERVICE_UNAVAILABLE:
+        return web.json_response({"error": str(exc), "code": exc.code}, status=503)
     return web.json_response({"error": str(exc), "code": exc.code}, status=400)
 
 
@@ -346,6 +362,40 @@ def guarded(handler: Handler) -> Handler:
 def route(handler: Handler) -> Handler:
     """The standard decorator stack for every Meetings handler."""
     return require_enabled(guarded(handler))
+
+
+# ── the live session, for every transcript producer ─────────────────────────
+
+
+async def live_session(request: web.Request, meeting_id: str) -> MeetingSession:
+    """The live session for *meeting_id*, or raise the right 4xx.
+
+    Shared by every transcript PRODUCER: the browser's speech stream and the
+    broadcast bar (``agents.handle_dispatch_text``), and an imported recording
+    (``audio_import.handle_import_audio``).
+
+    Extracted rather than copied because the expiry branch has SIDE EFFECTS — drain
+    the queues, then mark the meeting ended on disk — and a second copy of those is a
+    second thing that has to stay correct. Raising (rather than returning a response)
+    is what lets both callers read as a straight line; ``guarded`` turns these into
+    the same 409/410 bodies they returned before.
+    """
+    session = ACTIVE.get(meeting_id)
+    if session is None:
+        raise BadRequest("no active meeting", status=409, code="no_active_meeting")
+    if session.expired:
+        # Drain, not cancel: a long meeting whose next line arrives after the session
+        # lapsed still has whatever was queued when it went quiet, and that transcript
+        # is exactly what the final notes would otherwise omit.
+        await ACTIVE.drain_and_clear()
+        # Then mark it ended on disk, for the same reason gateway shutdown does
+        # (`routes/__init__._on_cleanup`): the live session is gone, so leaving the
+        # metadata saying `active` makes the dashboard show Live and keep recording
+        # into 409s. `ended` is both honest and recoverable — it is the one status the
+        # user can Restart from.
+        await asyncio.to_thread(end_meeting_meta, meeting_id, data_root(request))
+        raise BadRequest("meeting session expired", status=410, code="meeting_session_expired")
+    return session
 
 
 # ── gateway wiring ──────────────────────────────────────────────────────────

@@ -1,8 +1,8 @@
 {
   "name": "meetings",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "displayName": "Meetings",
-  "description": "An AI meeting assistant. Transcribes a live meeting, keeps structured notes and diagrams as it goes, extracts action items, and lets you review them before filing.",
+  "description": "An AI meeting assistant. Records a call — your microphone plus what the other participants are saying — transcribes it, keeps structured notes and diagrams as it goes, extracts action items, and lets you review them before filing. Read the transcript back in another language while it runs, correct the minutes yourself without the agent overwriting you, and keep your own notes with pasted screenshots alongside.",
   "author": "adunuthu",
   "tags": [
     "meetings",
@@ -13,7 +13,11 @@
   ],
   "highlights": [
     "Live transcription through KiroCrew's own speech-to-text — no extra daemon, no cloud account beyond what you already use",
+    "Records both sides of a call, not just your microphone, and keeps the audio as a plain WAV in your own data directory",
     "A crew of agents works the meeting in parallel: structured notes, an HTML/Mermaid diagram, and an action-item list",
+    "Minutes stay yours to edit: your corrections live in a separate file, so the agent's next rewrite never overwrites them and reverting is always one click",
+    "Read the transcript back line by line in another language while the meeting runs",
+    "Keep your own notes beside the agents' — paste a screenshot and it lands with the meeting's elapsed time",
     "Correct recurring speech-to-text mistakes once with a domain dictionary and every later meeting gets them right",
     "Review extracted action items before anything is filed — archive the noise, file the rest",
     "Pluggable task and calendar providers: ships a local task ledger and an iCalendar (.ics) reader, and an organization can register its own"
@@ -34,7 +38,9 @@
     "api": [
       "/api/apps/meetings",
       "/api/apps/meetings/*",
-      "/api/ws/stt"
+      "/api/ws/stt",
+      "/api/ws/recording",
+      "/api/file-raw"
     ],
     "network": true,
     "storage": true

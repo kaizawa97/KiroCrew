@@ -1516,13 +1516,14 @@ class TestNoStoreCallRunsOnTheEventLoop:
     def _route_modules(self) -> list:
         from kiro_crew.apps.builtins.meetings.backend.routes import (
             agents,
+            audio_import,
             calendar,
             meeting_lifecycle,
             settings,
             tasks,
         )
 
-        return [agents, calendar, meeting_lifecycle, settings, tasks]
+        return [agents, audio_import, calendar, meeting_lifecycle, settings, tasks]
 
     def _inline_blocking_calls(self, module) -> list[str]:
         """`file:line handler -> callee()` for every blocking call in an `async def`.

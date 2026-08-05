@@ -27,6 +27,7 @@ from kiro_crew.apps.builtins.meetings.backend.routes._common import (
     field_bool,
     field_str,
     json_body,
+    live_session,
 )
 from kiro_crew.security import redact
 
@@ -285,21 +286,9 @@ async def handle_dispatch_text(request: web.Request) -> web.Response:
     text = field_str(body, "text", required=True, max_len=k.MAX_TRANSCRIPT_CHARS)
     is_chat = field_bool(body, "chat", default=False)
 
-    session = ACTIVE.get(meeting_id)
-    if session is None:
-        return web.json_response({"error": "no active meeting", "code": "no_active_meeting"}, status=409)
-    if session.expired:
-        # Drain, not cancel: a long meeting whose next line arrives after the
-        # session lapsed still has whatever was queued when it went quiet, and
-        # that transcript is exactly what the final notes would otherwise omit.
-        await ACTIVE.drain_and_clear()
-        # Then mark it ended on disk, for the same reason gateway shutdown does
-        # (`routes/__init__._on_cleanup`): the live session is gone, so leaving the
-        # metadata saying `active` makes the dashboard show Live and keep recording
-        # into 409s. `ended` is both honest and recoverable — it is the one status
-        # the user can Restart from.
-        await asyncio.to_thread(sess.end_meeting_meta, meeting_id, data_root(request))
-        return web.json_response({"error": "meeting session expired", "code": "meeting_session_expired"}, status=410)
+    # Resolving the session (and handling an expired one, which has side effects) is
+    # shared with the audio-import producer — see `_common.live_session`.
+    session = await live_session(request, meeting_id)
 
     line = redact(text)
     if is_chat:
