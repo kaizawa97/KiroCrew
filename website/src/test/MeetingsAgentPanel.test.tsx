@@ -23,10 +23,19 @@
 
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
+import { readFileSync } from 'node:fs'
 
 import AgentPanel from '../apps/meetings/components/AgentPanel'
 import type { AgentDef } from '../apps/meetings/api'
 import { MERMAID_RUNTIME_PATH } from '../lib/vendorPaths'
+import EN_CATALOG from '../i18n/locales/en.json'
+
+// Read as source, not imported: these assertions are about the SHAPE of the call
+// (which cache operation, which HTTP method) rather than its result, and the same
+// pattern the note's tests use.
+const SessionSource = readFileSync('src/apps/meetings/hooks/useMeetingSession.ts', 'utf-8')
+const ViewSource = readFileSync('src/apps/meetings/MeetingView.tsx', 'utf-8')
+const ApiSource = readFileSync('src/apps/meetings/api.ts', 'utf-8')
 
 const MARKDOWN: AgentDef = { id: 'note-taker', name: 'Note Taker', widget_type: 'markdown' }
 const HTML: AgentDef = { id: 'sketch-artist', name: 'Sketch Artist', widget_type: 'html' }
@@ -189,5 +198,206 @@ describe('AgentPanel — chat mode', () => {
     mount(MARKDOWN, { chatView: true, output: '# ignored while chatting' })
     expect(screen.getByRole('textbox')).toBeTruthy()
     expect(screen.getByLabelText('Show output')).toBeTruthy()
+  })
+})
+// ── editable minutes ────────────────────────────────────────────────────────
+//
+// The user's edit of an agent's output. The panel shows ONE copy — an edit wins
+// server-side, so `output` is already whatever belongs on screen — which means
+// everything worth testing here is about the two things a reader cannot otherwise
+// tell, and the one thing that would lose their work:
+//
+//   * that they are looking at their own text rather than the agent's ("Edited");
+//   * that the agent has written more since ("stale");
+//   * that the 5-second outputs poll cannot type over an open draft.
+//
+// The last is the one that bites. The draft is local state seeded when edit mode
+// opens, and `rerenders under an open editor` is what pins that.
+
+const EDITABLE = EN_CATALOG.apps.meetings.agentPanel
+
+function mountEditable(
+  overrides: Partial<React.ComponentProps<typeof AgentPanel>> = {},
+) {
+  const onSaveOutput = vi.fn()
+  const onRevertOutput = vi.fn()
+  const props: React.ComponentProps<typeof AgentPanel> = {
+    agent: MARKDOWN,
+    output: '# Generated\n\nby the agent',
+    listening: true,
+    chatView: false,
+    onToggleListening: vi.fn(),
+    onToggleChatView: vi.fn(),
+    onSendMessage: vi.fn(),
+    onSaveOutput,
+    onRevertOutput,
+    ...overrides,
+  }
+  const view = render(<AgentPanel {...props} />)
+  const openEditor = () => {
+    fireEvent.click(screen.getByLabelText(EDITABLE.edit))
+    return screen.getByLabelText('Note Taker output, editable') as HTMLTextAreaElement
+  }
+  return { ...view, props, onSaveOutput, onRevertOutput, openEditor }
+}
+
+describe('AgentPanel — editable minutes', () => {
+  it('offers no edit affordance when the output is not editable', () => {
+    // The ABSENCE of the callback is what disables it, so an html or chat agent
+    // gets no button even though the panel component is the same one.
+    mount(HTML, { output: '<p>x</p>' })
+    expect(screen.queryByLabelText(EDITABLE.edit)).toBeNull()
+    cleanup()
+    mount(CHAT)
+    expect(screen.queryByLabelText(EDITABLE.edit)).toBeNull()
+  })
+
+  it('seeds the editor with what is currently on screen', () => {
+    const { openEditor } = mountEditable()
+    expect(openEditor().value).toBe('# Generated\n\nby the agent')
+  })
+
+  it('gives the editor a name distinct from the panel title', () => {
+    // Same reasoning as the note's editor: the region and the control are
+    // different things, and one shared name makes them indistinguishable to a
+    // screen reader.
+    const { openEditor } = mountEditable()
+    expect(openEditor().getAttribute('aria-label')).not.toBe('Note Taker')
+  })
+
+  it('saves the draft and closes the editor', () => {
+    const { openEditor, onSaveOutput } = mountEditable()
+    const field = openEditor()
+    fireEvent.change(field, { target: { value: '# Mine\n' } })
+    fireEvent.click(screen.getByText(EDITABLE.save))
+    expect(onSaveOutput).toHaveBeenCalledWith('# Mine\n')
+    expect(screen.queryByLabelText('Note Taker output, editable')).toBeNull()
+  })
+
+  it('cancelling discards the draft and never calls the server', () => {
+    const { openEditor, onSaveOutput } = mountEditable()
+    fireEvent.change(openEditor(), { target: { value: 'scratch' } })
+    fireEvent.click(screen.getByText(EDITABLE.cancel))
+    expect(onSaveOutput).not.toHaveBeenCalled()
+    // Reopening starts from the agent's text again, not from the abandoned draft.
+    expect(screen.getByLabelText(EDITABLE.edit)).toBeTruthy()
+  })
+
+  it('a poll landing under an open editor does not overwrite the draft', () => {
+    // The failure this prevents: the outputs query refetches every few seconds
+    // during a live meeting, so a `value={output}` editor would lose a sentence
+    // mid-typing. The draft is seeded once, on open.
+    const props: React.ComponentProps<typeof AgentPanel> = {
+      agent: MARKDOWN,
+      output: '# Generated\n',
+      listening: true,
+      chatView: false,
+      onToggleListening: vi.fn(),
+      onToggleChatView: vi.fn(),
+      onSendMessage: vi.fn(),
+      onSaveOutput: vi.fn(),
+      onRevertOutput: vi.fn(),
+    }
+    const { rerender } = render(<AgentPanel {...props} />)
+    fireEvent.click(screen.getByLabelText(EDITABLE.edit))
+    const field = screen.getByLabelText('Note Taker output, editable') as HTMLTextAreaElement
+    fireEvent.change(field, { target: { value: 'half a sentence' } })
+
+    rerender(<AgentPanel {...props} output="# Generated\n\nthe agent added more" />)
+
+    expect(
+      (screen.getByLabelText('Note Taker output, editable') as HTMLTextAreaElement).value,
+    ).toBe('half a sentence')
+  })
+
+  it('hides the chat toggle while editing, so a draft cannot be unmounted away', () => {
+    const { openEditor } = mountEditable()
+    expect(screen.getByLabelText('Show chat')).toBeTruthy()
+    openEditor()
+    expect(screen.queryByLabelText('Show chat')).toBeNull()
+  })
+
+  it('marks an edited panel, and only an edited one', () => {
+    mount(MARKDOWN, { output: '# Generated\n', onSaveOutput: vi.fn() })
+    expect(screen.queryByText(EDITABLE.edited)).toBeNull()
+    cleanup()
+    mountEditable({ edit: { updated_at: '2026-01-01T00:00:00Z', stale: false } })
+    expect(screen.getByText(EDITABLE.edited)).toBeTruthy()
+  })
+
+  it('says so when the agent has written more since the edit', () => {
+    // Without this the panel looks like the agent simply stopped working.
+    mountEditable({ edit: { updated_at: '2026-01-01T00:00:00Z', stale: true } })
+    expect(screen.getByText(/has written more since you edited this/)).toBeTruthy()
+  })
+
+  it('stays quiet when the edit is the newer copy', () => {
+    mountEditable({ edit: { updated_at: '2026-01-01T00:00:00Z', stale: false } })
+    expect(screen.queryByText(/has written more since you edited this/)).toBeNull()
+  })
+
+  it('reverts on request, and offers no revert when there is nothing to discard', () => {
+    mountEditable()
+    expect(screen.queryByLabelText(EDITABLE.revert)).toBeNull()
+    cleanup()
+    const { onRevertOutput } = mountEditable({
+      edit: { updated_at: '2026-01-01T00:00:00Z', stale: true },
+    })
+    fireEvent.click(screen.getByLabelText(EDITABLE.revert))
+    expect(onRevertOutput).toHaveBeenCalled()
+  })
+
+  it('disables the editor controls while a save is in flight', () => {
+    // Cancel is disabled too, not just Save: it discards the draft, so letting it
+    // fire mid-request would throw away text whose fate is still unknown.
+    const { openEditor } = mountEditable({ editSaving: true })
+    openEditor()
+    expect((screen.getByText(EDITABLE.save) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByText(EDITABLE.cancel) as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('leaves the editor controls live when nothing is in flight', () => {
+    const { openEditor } = mountEditable()
+    openEditor()
+    expect((screen.getByText(EDITABLE.save) as HTMLButtonElement).disabled).toBe(false)
+    expect((screen.getByText(EDITABLE.cancel) as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('disables revert while a write is in flight', () => {
+    mountEditable({
+      edit: { updated_at: '2026-01-01T00:00:00Z', stale: true },
+      editSaving: true,
+    })
+    expect((screen.getByLabelText(EDITABLE.revert) as HTMLButtonElement).disabled).toBe(true)
+  })
+})
+
+describe('editable minutes — wiring', () => {
+  it('the session hook refetches after a write instead of seeding the cache', () => {
+    // The opposite of what the NOTE does, deliberately. After a save the
+    // interesting question is what the *other* writer has been doing, and the
+    // response cannot answer it: `stale` is computed against a generated file the
+    // agent may have rewritten in the meantime.
+    const save = SessionSource.slice(
+      SessionSource.indexOf('const editOutputMutation'),
+      SessionSource.indexOf('const revertOutputMutation'),
+    )
+    expect(save).toContain('invalidateQueries')
+    expect(save).not.toContain('setQueryData')
+  })
+
+  it('the view withholds the edit callback from a non-markdown agent', () => {
+    // Belt-and-braces with the server's own 409: a button that could only fail
+    // should not be on screen.
+    expect(ViewSource).toContain("agent.widget_type === 'markdown'")
+    expect(ViewSource).toContain('onSaveOutput={')
+  })
+
+  it('the client sends the agent id in the body, not the path', () => {
+    // Matches the task routes, and is why there is no `{agent_id}` segment to
+    // validate server-side.
+    expect(ApiSource).toContain("method: 'PUT'")
+    expect(ApiSource).toContain("method: 'DELETE'")
+    expect(ApiSource).toContain('agent_id: agentId')
   })
 })

@@ -1157,15 +1157,23 @@
     "meetings": {
       "agentPanel": {
         "awaitingOutput": "O resultado de {{name}} aparecerá aqui.",
+        "cancel": "Cancelar",
         "chatEmpty": "Ainda não foi enviado nada para {{name}}.",
         "diagramFrameTitle": "Diagrama de {{name}}",
+        "edit": "Editar esta saída",
+        "edited": "Editado",
+        "editorLabel": "Saída de {{name}}, editável",
         "listeningHint": "Está a ouvir a reunião",
         "messagePlaceholder": "Mensagem para {{name}}…",
         "mute": "Silenciar {{name}}",
         "mutedHint": "Não está a ouvir a reunião",
+        "revert": "Descartar minhas edições",
+        "revertHint": "Descartar minhas edições e mostrar o que {{name}} escreveu",
+        "save": "Salvar",
         "send": "Enviar",
         "showChat": "Mostrar a conversa",
         "showOutput": "Mostrar o resultado",
+        "staleEdit": "{{name}} escreveu mais desde que você editou este texto. Sua versão está sendo exibida; descarte suas edições para ver a dele.",
         "unmute": "Reativar {{name}}"
       },
       "broadcastBar": {
@@ -1307,6 +1315,8 @@
         "taskFileFailed": "Não foi possível registar essa tarefa.",
         "taskFiled": "Tarefa registada.",
         "untitled": "Reunião sem título",
+        "minutesSaveFailed": "Não foi possível salvar suas edições.",
+        "minutesRevertFailed": "Não foi possível descartar suas edições.",
         "noteSaveFailed": "Não foi possível guardar a sua nota.",
         "noteImageFailed": "Não foi possível adicionar essa imagem. Cole um PNG, JPEG, GIF ou WebP.",
         "noteImageTooLarge": "Essa imagem é demasiado grande para uma nota."

@@ -80,6 +80,17 @@ ALLOWED_TRANSITIONS: dict[str, tuple[str, ...]] = {
 WIDGET_EXT_MAP: dict[str, str | None] = {"markdown": ".md", "html": ".html", "chat": None}
 DEFAULT_WIDGET_TYPE = "markdown"
 
+#: The one widget type whose output the user may edit (the editable minutes).
+#:
+#: ``html`` is a GENERATED artifact — the sketch artist's Mermaid document — not
+#: prose, so a textarea over its source is not an affordance anyone wants, and
+#: accepting hand-written HTML would open a document-authoring surface whose output
+#: renders in an iframe for no gain (it is sandboxed and CSP-locked, so this is not a
+#: new hole — just not a surface worth opening). ``chat`` agents have no output file
+#: at all. Read by BOTH the edit-write gate and the read overlay, so the rule lives
+#: in exactly one place and cannot come apart.
+EDITABLE_WIDGET_TYPE = "markdown"
+
 # On-disk layout under ``app_data_dir("meetings")``.
 DATA_SUBDIRS = ("meetings", "notes", "widgets", "tasks", "configs")
 CONFIG_FILE = "config.json"
@@ -206,3 +217,42 @@ MAX_NOTE_IMAGE_BYTES = 8 * 1024 * 1024
 #: Images one meeting's note may accumulate. Bounds the directory a single meeting
 #: can create, since each paste writes a new file and nothing deletes them.
 MAX_NOTE_IMAGES = 200
+
+# ── editable minutes ────────────────────────────────────────────────────────
+
+#: Subdirectory holding the user's edits of agent outputs, inside a meeting folder.
+#:
+#: A DIRECTORY rather than a name-mangled sibling, and that choice is the security
+#: property: an agent's output path is always
+#: ``meeting_dir / (safe_agent_id(id) + WIDGET_EXT_MAP[widget_type])`` — a FLAT
+#: filename — and ``_SAFE_AGENT_ID_RE`` (``^[a-z0-9][a-z0-9-]*$``) cannot contain a
+#: path separator. So no configured agent, whatever the user names it, can be handed
+#: a path inside here and overwrite the very edit that exists to survive its next
+#: write. Same argument as :data:`NOTE_IMAGES_DIR`, and it is why the sidecar needs
+#: no leading-underscore trick like :data:`NOTE_FILE`. The name matches the
+#: ``edits/`` layout MeetNote shipped, so the concept reads the same in both.
+AGENT_EDITS_DIR = "edits"
+
+#: Ceiling on one edited agent output.
+#:
+#: Twice :data:`MAX_NOTE_CHARS`, because this is a whole GENERATED document the user
+#: is correcting rather than a memo they typed: the note-taker is prompted to rewrite
+#: its entire file after every transcription batch, so a long meeting's minutes are
+#: already larger than anything a person writes by hand.
+MAX_MINUTES_CHARS = 200_000
+
+#: Body cap for the minutes PUT specifically, replacing ``_common.MAX_BODY_BYTES``.
+#:
+#: **The relationship to :data:`MAX_MINUTES_CHARS` is load-bearing, so it is spelled
+#: out.** ``json_body``'s default cap is 256 KiB, which is FEWER bytes than
+#: ``MAX_MINUTES_CHARS`` characters as soon as the text is not ASCII — Japanese
+#: minutes run three bytes per character, so a 200 000-character document is ~600 KB
+#: and the default cap would answer 413 for a document the char limit accepts. That
+#: is the worst shape of failure available here: the user can OPEN the document, edit
+#: it, and only then be told it cannot be saved.
+#:
+#: 1 MiB covers 200 000 characters at three bytes each with headroom for JSON
+#: escaping, and is far under the gateway's own 60 MiB ``client_max_size``, so this
+#: is the only cap that governs. Raised for this ONE route rather than for all of
+#: them: every other body here is a short field.
+MAX_MINUTES_BODY_BYTES = 1024 * 1024

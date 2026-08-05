@@ -1497,6 +1497,12 @@ class TestNoStoreCallRunsOnTheEventLoop:
             "ensure_agent_files",
             "read_agent_outputs",
             "write_agent_output",
+            "agent_edits_dir",
+            "agent_edit_path",
+            "read_agent_edit",
+            "read_agent_edits",
+            "write_agent_edit",
+            "revert_agent_edit",
             "read_calendar_cache",
             "write_calendar_cache",
         }

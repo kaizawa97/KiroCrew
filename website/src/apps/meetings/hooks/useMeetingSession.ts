@@ -281,6 +281,35 @@ export function useMeetingSession({ eventId, fallbackTitle, config, notify }: Op
     [meetingId, notify],
   )
 
+  // ── editable minutes ──────────────────────────────────────────────────────
+  //
+  // Both mutations INVALIDATE the outputs poll rather than seeding the cache, which
+  // is the opposite of what the note does — and the difference is the point. The
+  // note has one writer (the textarea) and autosaves, so a refetch could land
+  // mid-keystroke. An agent output has TWO writers, and after a save or a revert the
+  // interesting question is what the *other* one has been doing: the response cannot
+  // answer it, because `stale` is computed against a generated file that the agent
+  // may have rewritten in the meantime. So a refetch is the correct thing here.
+  //
+  // Safe to refetch, too: the editor's draft is local state seeded when edit mode
+  // opens, so a poll landing under it cannot overwrite what the user is typing.
+  const editOutputMutation = useMutation({
+    mutationFn: ({ agentId, content }: { agentId: string; content: string }) =>
+      meetingsApi.saveOutput(meetingId, agentId, content),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: [...scope, 'outputs'] })
+    },
+    onError: () => notify(i18nT('apps.meetings.session.minutesSaveFailed'), { type: 'error' }),
+  })
+
+  const revertOutputMutation = useMutation({
+    mutationFn: (agentId: string) => meetingsApi.revertOutput(meetingId, agentId),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: [...scope, 'outputs'] })
+    },
+    onError: () => notify(i18nT('apps.meetings.session.minutesRevertFailed'), { type: 'error' }),
+  })
+
   // ── live translation ──────────────────────────────────────────────────────
   //
   // Polled incrementally: the endpoint takes a `since` cursor and returns only
@@ -356,6 +385,9 @@ export function useMeetingSession({ eventId, fallbackTitle, config, notify }: Op
   )
   const mutedAgents = meta?.muted_agents ?? []
   const outputs = outputsQuery.data?.outputs ?? {}
+  // Present only for agents the user has edited, so a key check answers "is this
+  // panel showing my text or the agent's?".
+  const outputEdits = outputsQuery.data?.edits ?? {}
   const tasks: Task[] = outputsQuery.data?.tasks ?? []
 
   const invalidate = useCallback(() => {
@@ -659,6 +691,13 @@ export function useMeetingSession({ eventId, fallbackTitle, config, notify }: Op
     enabledIds,
     mutedAgents,
     outputs,
+    /** Editable minutes: keyed by agent id, present only where an edit exists. */
+    outputEdits,
+    /** True while a minutes save or revert is in flight, for either agent. */
+    editingOutput: editOutputMutation.isPending || revertOutputMutation.isPending,
+    saveOutput: (agentId: string, content: string) =>
+      editOutputMutation.mutate({ agentId, content }),
+    revertOutput: (agentId: string) => revertOutputMutation.mutate(agentId),
     tasks,
     caption,
     chatViewAgents,

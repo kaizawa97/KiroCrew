@@ -665,6 +665,162 @@ def write_agent_output(
     atomic_write(path, content)
 
 
+# ── editable minutes: user edits of agent output, as sidecars ───────────────
+#
+# The one place this app's agent-ownership model bends, so the bargain is written
+# down rather than implied:
+#
+#   The agent keeps sole ownership of its OWN file. A user edit is a SEPARATE file
+#   that takes precedence when the output is read. So the agent's next rewrite
+#   cannot destroy the user's correction, the user's correction cannot destroy the
+#   agent's work, and reverting is a delete rather than a restore.
+#
+# The cost of that, and it is a real one: while an edit exists the user stops seeing
+# what the agent writes. During a LIVE meeting that matters, so an edit records
+# nothing but its own mtime and :func:`read_agent_edit` compares it against the
+# generated file's — which is what lets the dashboard say "the agent has written
+# more since you edited this" instead of quietly freezing the panel.
+#
+# Ported from MeetNote's ``edits/<meeting_id>__<kind>.md`` (see
+# ``meetnote_lib/minutes.py`` on ``feat/meetnote``); the layout is per-meeting here
+# because this app already has a per-meeting directory to put it in.
+
+
+def agent_edits_dir(meeting_id: str, root: Path | None = None) -> Path:
+    """Directory holding user edits of agent outputs, containment-checked.
+
+    See :data:`constants.AGENT_EDITS_DIR` for why a subdirectory is what makes an
+    edit unreachable by any agent.
+    """
+    return contain(
+        meeting_dir(meeting_id, root) / k.AGENT_EDITS_DIR,
+        operation="meetings.agent_edits",
+        root=root,
+    )
+
+
+def agent_edit_path(
+    meeting_id: str, agent_def: dict[str, Any], root: Path | None = None
+) -> Path | None:
+    """Path of one agent's edit sidecar, or None for an agent with no output file.
+
+    The filename is :func:`agent_output_filename`'s, so it is derived from the
+    agent's VALIDATED id plus the fixed extension for its widget type — never from a
+    request. Reusing that derivation rather than accepting an id here is deliberate:
+    it means this function adds no new place a client string could become a path.
+
+    The sidecar keeps the output's extension so an edit renders through the same
+    widget path as the text it replaces.
+    """
+    fname = agent_output_filename(agent_def)
+    if not fname:
+        return None
+    return contain(
+        agent_edits_dir(meeting_id, root) / fname,
+        operation="meetings.agent_edit",
+        root=root,
+    )
+
+
+def _mtime(path: Path) -> float:
+    """*path*'s mtime, or 0.0 when it cannot be stat'd (missing, raced, denied)."""
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
+def read_agent_edit(
+    meeting_id: str, agent_def: dict[str, Any], root: Path | None = None
+) -> dict[str, Any] | None:
+    """One agent's edit, or None when the user has not edited it. BLOCKING.
+
+    ``stale`` is True when the agent has rewritten its own output SINCE the edit was
+    saved. Derived from the two mtimes rather than stored, so there is no second
+    piece of state that can drift out of true — and the sidecar stays a plain
+    markdown file a person can open in an editor.
+    """
+    path = agent_edit_path(meeting_id, agent_def, root)
+    if path is None or not path.is_file():
+        return None
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:  # pragma: no cover — raced with a revert
+        return None
+    edited_at = _mtime(path)
+    fname = agent_output_filename(agent_def)
+    generated_at = _mtime(agent_output_path(meeting_id, fname, root)) if fname else 0.0
+    return {
+        "content": content,
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(edited_at)),
+        "stale": generated_at > edited_at,
+    }
+
+
+def read_agent_edits(
+    meeting_id: str, agents: list[dict[str, Any]], root: Path | None = None
+) -> dict[str, dict[str, Any]]:
+    """Every agent's edit, keyed by agent id. BLOCKING.
+
+    Agents the user has not edited are ABSENT rather than present-and-empty, so the
+    dashboard can treat "has an edit" as a key check. An unusable agent definition
+    is skipped for the same reason :func:`read_agent_outputs` skips one — one bad
+    config entry must not blank the whole poll.
+    """
+    edits: dict[str, dict[str, Any]] = {}
+    for agent_def in agents:
+        try:
+            agent_id = safe_agent_id(agent_def.get("id"))
+            edit = read_agent_edit(meeting_id, agent_def, root)
+        except MeetingsPathError:
+            continue
+        if edit is not None:
+            edits[agent_id] = edit
+    return edits
+
+
+def write_agent_edit(
+    meeting_id: str, agent_def: dict[str, Any], content: str, root: Path | None = None
+) -> dict[str, Any]:
+    """Persist the user's edit of one agent's output. BLOCKING.
+
+    Writes the SIDECAR and never the agent's file — the whole point of the design.
+
+    Last-write-wins, like :func:`write_note` and for the same reason: a whole-file
+    replace with no read-modify-write to protect, so ``atomic_write`` alone already
+    makes it all-or-nothing and a lock would buy nothing.
+    """
+    path = agent_edit_path(meeting_id, agent_def, root)
+    if path is None:
+        raise MeetingsPathError(
+            "this agent has no output file to edit", status=409, code="agent_has_no_output"
+        )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    atomic_write(path, content)
+    stored = read_agent_edit(meeting_id, agent_def, root)
+    # A read-back that finds nothing means the write raced a revert. Report the
+    # content we wrote rather than None: the caller's request DID succeed.
+    return stored if stored is not None else {"content": content, "updated_at": "", "stale": False}
+
+
+def revert_agent_edit(
+    meeting_id: str, agent_def: dict[str, Any], root: Path | None = None
+) -> bool:
+    """Delete an edit sidecar so the agent's own output is served again. BLOCKING.
+
+    Returns whether one existed. Reverting is a delete and nothing else, which is
+    exactly what makes it always safe — the generated file was never touched.
+    """
+    path = agent_edit_path(meeting_id, agent_def, root)
+    if path is None or not path.is_file():
+        return False
+    try:
+        path.unlink()
+    except OSError:  # pragma: no cover — raced with another revert
+        return False
+    return True
+
+
 # ── calendar cache ──────────────────────────────────────────────────────────
 
 

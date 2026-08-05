@@ -1223,15 +1223,23 @@
     "meetings": {
       "agentPanel": {
         "awaitingOutput": "Die Ausgabe von {{name}} erscheint hier.",
+        "cancel": "Abbrechen",
         "chatEmpty": "Noch nichts an {{name}} gesendet.",
         "diagramFrameTitle": "Diagramm von {{name}}",
+        "edit": "Diese Ausgabe bearbeiten",
+        "edited": "Bearbeitet",
+        "editorLabel": "Ausgabe von {{name}}, bearbeitbar",
         "listeningHint": "Hört der Besprechung zu",
         "messagePlaceholder": "Nachricht an {{name}}…",
         "mute": "{{name}} stummschalten",
         "mutedHint": "Hört der Besprechung nicht zu",
+        "revert": "Meine Änderungen verwerfen",
+        "revertHint": "Meine Änderungen verwerfen und anzeigen, was {{name}} geschrieben hat",
+        "save": "Speichern",
         "send": "Senden",
         "showChat": "Chat anzeigen",
         "showOutput": "Ausgabe anzeigen",
+        "staleEdit": "{{name}} hat seit deiner Bearbeitung weitergeschrieben. Angezeigt wird deine Version; verwirf deine Änderungen, um die andere zu sehen.",
         "unmute": "Stummschaltung von {{name}} aufheben"
       },
       "broadcastBar": {
@@ -1370,6 +1378,8 @@
         "taskFileFailed": "Diese Aufgabe konnte nicht angelegt werden.",
         "taskFiled": "Aufgabe angelegt.",
         "untitled": "Besprechung ohne Titel",
+        "minutesSaveFailed": "Deine Änderungen konnten nicht gespeichert werden.",
+        "minutesRevertFailed": "Deine Änderungen konnten nicht verworfen werden.",
         "noteSaveFailed": "Ihre Notiz konnte nicht gespeichert werden.",
         "noteImageFailed": "Dieses Bild konnte nicht hinzugefügt werden. Fügen Sie ein PNG, JPEG, GIF oder WebP ein.",
         "noteImageTooLarge": "Dieses Bild ist zu groß für eine Notiz."
