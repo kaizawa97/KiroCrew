@@ -263,9 +263,53 @@ class TestMeetingLifecycleRoutes:
 
     @pytest.mark.asyncio
     async def test_init_rejects_a_traversal_id(self, app):
+        """400, and it is worth saying WHICH of the two barriers answers.
+
+        ``safe_meeting_id`` refuses this before ``contain`` ever sees it — the id is
+        not ``[A-Za-z0-9._-]``, so it never becomes a path segment at all. That makes
+        400 the right status here: the request is malformed, not forbidden.
+
+        This assertion used to read ``in (400, 403, 404)``, and that looseness is how
+        a real bug survived: ``contain``'s own violation carries 403 and was being
+        reported as 400, and no HTTP-level test could tell. The pair is now split —
+        this one pins 400, and ``TestContainmentIsReportedAsForbidden`` pins 403.
+        """
         async with client_for(app) as client:
             resp = await client.post(f"{BASE}/meetings/..%2F..%2Fetc/init", json={})
-            assert resp.status in (400, 403, 404)
+            assert resp.status == 400
+            assert (await resp.json())["code"] == "invalid_path"
+
+    @pytest.mark.asyncio
+    async def test_a_symlinked_meeting_dir_is_403_not_400(self, app, root: Path, tmp_path: Path):
+        """The regression test for the bug the loose assertion above was hiding.
+
+        ``contain`` is the SECOND barrier, and the one that fires here: the id
+        ``standup`` is perfectly legal, so ``safe_meeting_id`` passes it, and the
+        violation only appears once ``resolve()`` follows a symlink planted inside the
+        data dir and lands outside the root. That is the realistic reachable case —
+        traversal in the id itself never gets this far.
+
+        It carries 403 (``MeetingsPathError(status=403)``), but ``error_response`` had
+        no ``FORBIDDEN`` branch, so every containment violation answered **400** for as
+        long as this app has existed. A containment violation reported as "bad request"
+        reads like a typo the caller can fix by retrying, when in fact the server just
+        refused to leave its own data directory.
+
+        Asserted at the HTTP boundary on purpose: ``test_meetings_store.py``'s
+        ``test_outside_root_raises_403`` already proves the exception carries 403, and
+        that test passed throughout — the status was lost in the route layer, which is
+        the only place this can be caught.
+        """
+        outside = tmp_path / "elsewhere"
+        outside.mkdir()
+        planted = store.meetings_root(root) / "standup"
+        planted.parent.mkdir(parents=True, exist_ok=True)
+        planted.symlink_to(outside, target_is_directory=True)
+
+        async with client_for(app) as client:
+            resp = await client.get(f"{BASE}/meetings/standup")
+            assert resp.status == 403, "a containment violation must not read as 400"
+            assert (await resp.json())["code"] == "invalid_path"
 
     @pytest.mark.asyncio
     async def test_init_accepts_a_colon_id(self, app, root: Path):
