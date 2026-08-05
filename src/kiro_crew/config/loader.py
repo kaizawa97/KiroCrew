@@ -18,6 +18,7 @@ import math
 import os
 import re as _re
 import stat as _stat
+import sys
 import threading
 import uuid
 from collections.abc import Callable, Iterable
@@ -786,11 +787,12 @@ class AgentConfig:
         metadata=_meta(
             "Allow Unsandboxed Execution",
             "When true, allow agent subprocesses to execute without any sandbox "
-            "backend (fail-open). When false (default), wrap_argv raises a "
-            "RuntimeError if no sandbox backend is available and mode is not 'off', "
-            "preventing unsandboxed execution entirely (fail-closed). This is "
-            "distinct from sandbox_allow_no_isolation which only controls warning "
-            "severity — this field controls whether execution proceeds at all.",
+            "backend (fail-open). When false, wrap_argv raises a RuntimeError if "
+            "no sandbox backend is available and mode is not 'off', preventing "
+            "unsandboxed execution entirely (fail-closed). Defaults to true on "
+            "Windows (no OS-level sandbox backend available) and false elsewhere. "
+            "This is distinct from sandbox_allow_no_isolation which only controls "
+            "warning severity — this field controls whether execution proceeds at all.",
         ),
     )
     apps_allow_third_party: bool = field(
@@ -4327,7 +4329,10 @@ class KiroCrewConfig:
                     agent_data.get("sandbox_allow_no_isolation", False)
                 ),
                 sandbox_allow_unsandboxed_exec=bool(
-                    agent_data.get("sandbox_allow_unsandboxed_exec", False)
+                    agent_data.get(
+                        "sandbox_allow_unsandboxed_exec",
+                        sys.platform == "win32",
+                    )
                 ),
                 apps_allow_third_party=_safe_bool(
                     agent_data.get("apps_allow_third_party", False), False
