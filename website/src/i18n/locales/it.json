@@ -1307,7 +1307,9 @@
         "taskFileFailed": "Non è stato possibile registrare quell’azione.",
         "taskFiled": "Azione registrata.",
         "untitled": "Riunione senza titolo",
-        "noteSaveFailed": "Non è stato possibile salvare la tua nota."
+        "noteSaveFailed": "Non è stato possibile salvare la tua nota.",
+        "noteImageFailed": "Non è stato possibile aggiungere quell'immagine. Incolla un PNG, JPEG, GIF o WebP.",
+        "noteImageTooLarge": "Quell'immagine è troppo grande per una nota."
       },
       "settings": {
         "addTerm": "Aggiungi",
@@ -1382,7 +1384,10 @@
         "unsaved": "Modifiche non salvate",
         "saved": "Salvata",
         "hint": "Viene salvata automaticamente mentre scrivi.",
-        "editorLabel": "Testo della nota"
+        "editorLabel": "Testo della nota",
+        "preview": "Anteprima",
+        "edit": "Modifica",
+        "uploading": "Aggiunta dell'immagine…"
       }
     },
     "papyrus": {

@@ -1179,7 +1179,9 @@
         "taskFileFailed": "वह कार्य-बिंदु दर्ज नहीं हो सका।",
         "taskFiled": "कार्य-बिंदु दर्ज हुआ।",
         "untitled": "बिना शीर्षक मीटिंग",
-        "noteSaveFailed": "नोट सहेजा नहीं जा सका।"
+        "noteSaveFailed": "नोट सहेजा नहीं जा सका।",
+        "noteImageFailed": "वह छवि जोड़ी नहीं जा सकी। PNG, JPEG, GIF या WebP चिपकाओ।",
+        "noteImageTooLarge": "वह छवि नोट में जोड़ने के लिए बहुत बड़ी है।"
       },
       "settings": {
         "addTerm": "जोड़ें",
@@ -1253,7 +1255,10 @@
         "unsaved": "बिना सहेजे बदलाव",
         "saved": "सहेजा गया",
         "hint": "लिखते-लिखते अपने आप सहेजा जाता है।",
-        "editorLabel": "नोट का पाठ"
+        "editorLabel": "नोट का पाठ",
+        "preview": "पूर्वावलोकन",
+        "edit": "संपादित करें",
+        "uploading": "छवि जोड़ी जा रही है…"
       }
     },
     "papyrus": {

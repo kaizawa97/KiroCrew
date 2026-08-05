@@ -102,6 +102,11 @@ TRANSLATIONS_FILE = "translations.json"
 #: ``test_note_filename_is_unreachable_by_any_agent``.
 NOTE_FILE = "_note.md"
 
+#: Subdirectory holding images pasted into a note. Referenced from the note as a
+#: RELATIVE path (``![10:23](images/xxx.png)``), which is what lets the dashboard's
+#: markdown renderer resolve it through the existing hardened file route.
+NOTE_IMAGES_DIR = "images"
+
 # The always-on system agent that maintains ``tasks.json``. Not a configurable
 # entry in ``meeting_agents`` — it is a core feature of the app.
 TASK_EXTRACTOR_ID = "task-extractor"
@@ -193,3 +198,11 @@ MAX_TRANSLATION_LINES = 2000
 #: four hours ``MAX_SESSION_DURATION`` allows — but bounded, because the note is
 #: written by a request body and read back into a poll response.
 MAX_NOTE_CHARS = 100_000
+
+#: Ceiling on one pasted note image. A full-screen PNG screenshot on a retina
+#: display is comfortably under this; anything larger is not a screenshot.
+MAX_NOTE_IMAGE_BYTES = 8 * 1024 * 1024
+
+#: Images one meeting's note may accumulate. Bounds the directory a single meeting
+#: can create, since each paste writes a new file and nothing deletes them.
+MAX_NOTE_IMAGES = 200

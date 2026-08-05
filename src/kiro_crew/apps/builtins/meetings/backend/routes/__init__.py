@@ -211,6 +211,10 @@ def register_routes(app: web.Application) -> None:
     router.add_get(BASE + "/meetings/{meeting_id}/note", route(lifecycle_routes.handle_get_note))
     router.add_put(BASE + "/meetings/{meeting_id}/note", route(lifecycle_routes.handle_put_note))
     router.add_post(
+        BASE + "/meetings/{meeting_id}/note/images",
+        route(lifecycle_routes.handle_post_note_image),
+    )
+    router.add_post(
         BASE + "/meetings/{meeting_id}/attachments",
         route(lifecycle_routes.handle_attachments),
     )

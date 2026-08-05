@@ -1389,7 +1389,9 @@
         "taskFileFailed": "Impossible d’enregistrer cette action.",
         "taskFiled": "Action enregistrée.",
         "untitled": "Réunion sans titre",
-        "noteSaveFailed": "Impossible d'enregistrer votre note."
+        "noteSaveFailed": "Impossible d'enregistrer votre note.",
+        "noteImageFailed": "Impossible d'ajouter cette image. Collez un PNG, JPEG, GIF ou WebP.",
+        "noteImageTooLarge": "Cette image est trop volumineuse pour une note."
       },
       "settings": {
         "addTerm": "Ajouter",
@@ -1464,7 +1466,10 @@
         "unsaved": "Modifications non enregistrées",
         "saved": "Enregistrée",
         "hint": "Enregistrement automatique au fil de la saisie.",
-        "editorLabel": "Texte de la note"
+        "editorLabel": "Texte de la note",
+        "preview": "Aperçu",
+        "edit": "Modifier",
+        "uploading": "Ajout de l'image…"
       }
     },
     "papyrus": {

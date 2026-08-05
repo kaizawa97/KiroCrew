@@ -61,7 +61,11 @@ class TestFilenameCannotCollideWithAnAgent:
 class TestStore:
     def test_missing_note_reads_as_empty(self, root: Path):
         note = store.read_note("never-existed", root)
-        assert note == {"content": "", "updated_at": ""}
+        assert note["content"] == ""
+        assert note["updated_at"] == ""
+        # `path` is present even for a note that does not exist yet: the frontend
+        # needs it to resolve relative image links the moment the first paste lands.
+        assert note["path"].endswith(k.NOTE_FILE)
 
     def test_round_trips_content(self, root: Path):
         store.write_note("m1", "# Heading\n\n- a point", root)
@@ -100,7 +104,10 @@ class TestRoutes:
         async with client_for(app) as client:
             resp = await client.get(f"{k.API_BASE}/meetings/m1/note")
             assert resp.status == 200
-            assert await resp.json() == {"content": "", "updated_at": ""}
+            body = await resp.json()
+        assert body["content"] == ""
+        assert body["updated_at"] == ""
+        assert body["path"].endswith(f"m1/{k.NOTE_FILE}")
 
     @pytest.mark.asyncio
     async def test_put_then_get(self, app):

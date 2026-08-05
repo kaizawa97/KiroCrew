@@ -985,7 +985,9 @@
         "taskFileFailed": "Could not file that action item.",
         "taskFiled": "Action item filed.",
         "untitled": "Untitled meeting",
-        "noteSaveFailed": "Could not save your note."
+        "noteSaveFailed": "Could not save your note.",
+        "noteImageFailed": "Could not add that image. Paste a PNG, JPEG, GIF or WebP.",
+        "noteImageTooLarge": "That image is too large to add to a note."
       },
       "settings": {
         "addTerm": "Add",
@@ -1059,7 +1061,10 @@
         "unsaved": "Unsaved changes",
         "saved": "Saved",
         "hint": "Saves automatically as you type.",
-        "editorLabel": "Note text"
+        "editorLabel": "Note text",
+        "preview": "Preview",
+        "edit": "Edit",
+        "uploading": "Adding image…"
       }
     },
     "papyrus": {

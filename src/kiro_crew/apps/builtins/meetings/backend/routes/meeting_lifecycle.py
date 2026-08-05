@@ -14,13 +14,16 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import uuid
+from datetime import datetime, timezone
 from http import HTTPStatus
 from typing import Any
 
-from aiohttp import web
+from aiohttp import BodyPartReader, web
 
 from kiro_crew.apps.builtins.meetings.backend import constants as k
 from kiro_crew.apps.builtins.meetings.backend import store
+from kiro_crew.apps.builtins.meetings.backend.domain import images
 from kiro_crew.apps.builtins.meetings.backend.domain import session as sess
 from kiro_crew.apps.builtins.meetings.backend.domain import translate
 from kiro_crew.apps.builtins.meetings.backend.routes import tasks as task_routes
@@ -452,6 +455,127 @@ async def handle_put_note(request: web.Request) -> web.Response:
 
     note = await asyncio.to_thread(store.write_note, meeting_id, content, root)
     return web.json_response({"ok": True, **note})
+
+
+def _note_image_alt(meeting_id: str, root: Any) -> str:
+    """The meeting's elapsed time, as the alt text for a pasted image. BLOCKING.
+
+    Empty when the meeting has not started or its metadata is unreadable — an
+    honest ``![](images/…)`` beats inventing a timestamp, and the image is still
+    useful without one.
+    """
+    meta = store.read_meeting_meta(meeting_id, root) or {}
+    started = str(meta.get("started_at") or "")
+    if not started:
+        return ""
+    try:
+        begin = datetime.strptime(started, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return ""
+    return images.format_elapsed((datetime.now(timezone.utc) - begin).total_seconds())
+
+
+def _note_image_count(meeting_id: str, root: Any) -> int:
+    """How many images this note already has. BLOCKING."""
+    directory = store.note_images_dir(meeting_id, root)
+    try:
+        return sum(1 for entry in directory.iterdir() if entry.is_file())
+    except OSError:
+        return 0
+
+
+async def handle_post_note_image(request: web.Request) -> web.Response:
+    """Store one image pasted into a meeting note.
+
+    The app's first binary upload, so the posture is spelled out:
+
+    * The client's **filename is never used**. The extension comes from sniffing
+      the bytes (``domain/images.sniff_image_ext``) and the name is a fresh uuid4,
+      so no client-supplied string reaches a path at all — a stronger position than
+      sanitizing a name and then checking it, and the reason there is no traversal
+      case to reason about.
+    * An **unrecognised signature is refused**, which is what keeps SVG out: it has
+      no binary signature, and it is a document that can carry script rather than
+      an image.
+    * The body is read in **bounded chunks** and abandoned the moment it exceeds the
+      cap, so an oversized paste is never fully buffered.
+    * Rejections are SEL-audited, mirroring ``api_upload_file``.
+
+    Serving is deliberately NOT implemented here. The note references the image
+    relatively and the dashboard's markdown renderer resolves that through
+    ``/api/file-raw``, which already derives content type from magic bytes, refuses
+    symlinks, and sets ``nosniff``. A second file-serving path is exactly what
+    ``pptx_maker`` documents as the thing not to add.
+    """
+    meeting_id = _meeting_id(request)
+    root = data_root(request)
+
+    def _reject(reason: str) -> None:
+        audit("meetings.note_image", f"{meeting_id} reason:{reason}", outcome="rejected")
+
+    if not request.content_type.startswith("multipart/"):
+        _reject("not_multipart")
+        raise BadRequest("expected a multipart/form-data body")
+
+    if await asyncio.to_thread(_note_image_count, meeting_id, root) >= k.MAX_NOTE_IMAGES:
+        _reject("too_many_images")
+        raise BadRequest(f"this note already has {k.MAX_NOTE_IMAGES} images")
+
+    reader = await request.multipart()
+    part = await reader.next()
+    while part is not None and getattr(part, "name", None) != "file":
+        part = await reader.next()
+    if part is None or not isinstance(part, BodyPartReader):
+        _reject("no_file_part")
+        raise BadRequest("expected a form field named 'file'")
+
+    data = bytearray()
+    while True:
+        chunk = await part.read_chunk(8192)
+        if not chunk:
+            break
+        data.extend(chunk)
+        if len(data) > k.MAX_NOTE_IMAGE_BYTES:
+            # Abandoned mid-stream rather than read to the end and then measured.
+            _reject("too_large")
+            # A literal 413, not `HTTPStatus.REQUEST_ENTITY_TOO_LARGE`: the
+            # error-code contract scanner can only verify a `code` is present when
+            # the status is a literal, and a computed status lands in the ratcheted
+            # `dynamic_status` bucket instead. Spending ratchet budget to spell the
+            # number differently would be a bad trade.
+            return web.json_response(
+                {
+                    "error": "image too large",
+                    "code": "image_too_large",
+                    "max_bytes": k.MAX_NOTE_IMAGE_BYTES,
+                },
+                status=413,
+            )
+
+    ext = images.sniff_image_ext(bytes(data))
+    if ext is None:
+        _reject("unrecognised_format")
+        raise BadRequest("not a PNG, JPEG, GIF or WebP image")
+
+    filename = f"{uuid.uuid4().hex}{ext}"
+    await asyncio.to_thread(store.write_note_image, meeting_id, filename, bytes(data), root)
+    alt = await asyncio.to_thread(_note_image_alt, meeting_id, root)
+    audit("meetings.note_image", f"{meeting_id} {filename}", outcome="ok")
+    logger.info("meetings: stored a note image for %s (%d bytes)", meeting_id, len(data))
+
+    # `src` is relative so the renderer resolves it against the note's own location;
+    # `alt` is the meeting's elapsed time, which is what lets a reader line the image
+    # up against the transcript later. Both are computed HERE rather than in the
+    # client so there is one formatter and one clock.
+    return web.json_response(
+        {
+            "ok": True,
+            "filename": filename,
+            "src": f"{k.NOTE_IMAGES_DIR}/{filename}",
+            "alt": alt,
+            "content_type": images.CONTENT_TYPES.get(ext, "application/octet-stream"),
+        }
+    )
 
 
 def _read_translations_since(meeting_id: str, since: int, root: Any) -> dict[str, Any]:

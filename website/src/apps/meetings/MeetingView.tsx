@@ -336,7 +336,9 @@ export default function MeetingView({
         <NoteSidebar
           content={note.content}
           updatedAt={note.updatedAt}
+          path={note.path}
           saving={note.saving}
+          onUploadImage={session.uploadNoteImage}
           onSave={session.saveNote}
           onClose={() => session.setNoteOpen(false)}
         />

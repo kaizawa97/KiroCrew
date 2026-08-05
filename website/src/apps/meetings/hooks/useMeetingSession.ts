@@ -243,6 +243,7 @@ export function useMeetingSession({ eventId, fallbackTitle, config, notify }: Op
       queryClient.setQueryData([...scope, 'note'], {
         content: response.content,
         updated_at: response.updated_at,
+        path: response.path,
       })
     },
     // `notify` directly rather than `failureNotice`: that helper is declared
@@ -250,6 +251,35 @@ export function useMeetingSession({ eventId, fallbackTitle, config, notify }: Op
     // special case — the 409 "another meeting is active" — cannot arise for a note.
     onError: () => notify(i18nT('apps.meetings.session.noteSaveFailed'), { type: 'error' }),
   })
+
+  /**
+   * Store one pasted image, resolving with the markdown pieces to insert.
+   *
+   * Returns `null` on failure rather than throwing: a rejected paste must leave the
+   * note exactly as it was, and the user is told with a toast. The two cases worth
+   * distinguishing are the ones they can act on — shrink the image, or paste a
+   * different format.
+   */
+  const uploadNoteImage = useCallback(
+    async (file: File): Promise<{ alt: string; src: string } | null> => {
+      try {
+        const stored = await meetingsApi.uploadNoteImage(meetingId, file)
+        return { alt: stored.alt, src: stored.src }
+      } catch (error) {
+        const tooLarge = error instanceof MeetingsApiError && error.status === 413
+        notify(
+          i18nT(
+            tooLarge
+              ? 'apps.meetings.session.noteImageTooLarge'
+              : 'apps.meetings.session.noteImageFailed',
+          ),
+          { type: 'error' },
+        )
+        return null
+      }
+    },
+    [meetingId, notify],
+  )
 
   // ── live translation ──────────────────────────────────────────────────────
   //
@@ -642,10 +672,12 @@ export function useMeetingSession({ eventId, fallbackTitle, config, notify }: Op
       open: noteOpen,
       content: noteQuery.data?.content ?? '',
       updatedAt: noteQuery.data?.updated_at ?? '',
+      path: noteQuery.data?.path ?? '',
       saving: noteMutation.isPending,
     },
     setNoteOpen,
     saveNote: (content: string) => noteMutation.mutate(content),
+    uploadNoteImage,
     /** Live translation: `''` language means the feature is off. */
     translation: {
       language: translationLanguage,
