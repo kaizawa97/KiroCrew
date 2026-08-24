@@ -37,7 +37,9 @@ the recording hook BEFORE transcription, because the tee points that way.
 | `src/kiro_crew/builtin_skills/meetings/SKILL.md` | the bundled skill (data layout, lifecycle, provider config) |
 | `website/src/apps/meetings/` | `MeetingsPage` (list) → `MeetingView` → `TaskReviewView`, `SettingsView` |
 | `.../meetings/audio/systemAudio.ts` | requests the display surface and drops its video track |
+| `.../meetings/audio/captureTier.ts` | what this client can capture, resolved in the renderer |
 | `.../meetings/hooks/useMeetingRecording.ts` | owns the `/api/ws/recording` socket |
+| `website/electron/display-media.js` | `describeAudioTier` — the one place the Electron capture tier is decided |
 | `website/public/app-assets/meetings/` | icon + hero art |
 
 ## Routes
@@ -276,6 +278,33 @@ put back.** The spec requires a video track — omitting `video`, or passing
 `video: false`, rejects with a `TypeError` in every browser. The code asks for a
 1 fps video track and then stops and removes it. `systemAudioConstraints`' test is
 the regression guard.
+
+In Electron the tier is decided in exactly one place,
+`website/electron/display-media.js::describeAudioTier`, read by both `main.js` and
+`preload.js`. Three things about it:
+
+* **`electron-audio-loopback` is deliberately NOT a dependency.** Its own README
+  scopes it to Electron `>= 31 < 39` and says it is unnecessary from 39 on; this app
+  is on 43.2.0. A test pins its absence from `electron/package.json`.
+* **The loopback grant is conditional**, on `request.audioRequested` AND `win32` —
+  Electron 43's `electron.d.ts` says `Streams.audio: 'loopback'` is currently
+  Windows-only, and the handler is SHARED with the chat screen-snip tool.
+  Unconditional audio would have made every screenshot start a system-audio capture.
+* On **macOS the handler is not called at all**, because
+  `setDisplayMediaRequestHandler` is installed with `useSystemPicker: true`. macOS
+  audio is whatever the native picker gives.
+
+**Do not add a relative `require` to `electron/preload.js`.** It runs sandboxed,
+where `require` resolves only `electron`, `events`, `timers` and `url`; a relative
+require throws and takes the WHOLE preload down, so `window.kirocrew`,
+`electronAPI`, `zoomAPI` and `updateAPI` disappear at once. Main-process values
+reach the preload through `additionalArguments` → `process.argv`. Pinned by
+`MeetingsCaptureTier.test.ts`.
+
+The capture tier is **not** a field on `stt_providers`: that describes speech-to-text
+providers, and the tier is a property of the client (its platform and shell) which
+the gateway cannot observe. It is resolved in the renderer
+(`audio/captureTier.ts`).
 
 ## The two provider seams
 
@@ -516,6 +545,11 @@ translation), `MeetingsSessionLogic.test.ts` (dedup, preset resolution, the
 transition table), `MeetingsAgentPillBar.test.tsx`, `MeetingsBroadcastBar.test.tsx`,
 `MeetingsAgentPanel.test.tsx` (including the iframe sandbox),
 `MeetingsRecording.test.ts`, `MeetingsSystemAudio.test.ts` (including the
-`getDisplayMedia` constraint guard), and
+`getDisplayMedia` constraint guard), `MeetingsCaptureTier.test.ts` (including the
+preload-require pin), and
 `MeetingsTranscriptPanel.test.tsx` (durable/live rows, follow mode, and the
 split-to-primary layout transition).
+
+Electron: `website/electron` is a SECOND npm package with its own `node_modules`;
+its suite (`electron/test/display-media.test.js`, node:test) needs `npm ci` there
+before it will run.

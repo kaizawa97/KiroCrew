@@ -2734,6 +2734,7 @@
         "sysAudioCancelled": "仅录制麦克风：未共享会议音频。",
         "sysAudioEnded": "会议音频共享已停止。仍在录制麦克风。",
         "sysAudioNoAudio": "该屏幕没有可采集的音频。请共享会议所在的浏览器标签页并启用音频，以采集其他参会者的声音。",
+        "sysAudioNoLoopback": "桌面应用无法在此平台上采集会议音频。请在浏览器中打开控制面板，并共享会议所在的标签页，以采集其他参会者的声音。",
         "sysAudioUnsupported": "此浏览器无法采集会议音频。",
         "taskAddFailed": "无法添加该行动项。",
         "taskFileFailed": "无法提交该行动项。",

@@ -2826,6 +2826,7 @@
         "sysAudioCancelled": "Viene registrato solo il microfono: l'audio della riunione non è stato condiviso.",
         "sysAudioEnded": "La condivisione dell'audio della riunione è terminata. Il microfono continua a essere registrato.",
         "sysAudioNoAudio": "Questo schermo non ha audio. Condividi la scheda del browser della riunione e attiva l'audio per includere gli altri partecipanti.",
+        "sysAudioNoLoopback": "L'app desktop non può acquisire l'audio della riunione su questa piattaforma. Apri la dashboard in un browser e condividi la scheda della riunione per includere gli altri partecipanti.",
         "sysAudioUnsupported": "Questo browser non può acquisire l'audio della riunione.",
         "taskAddFailed": "Non è stato possibile aggiungere quell’azione.",
         "taskFileFailed": "Non è stato possibile registrare quell’azione.",

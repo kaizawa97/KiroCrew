@@ -1765,6 +1765,7 @@
         "sysAudioCancelled": "Recording the microphone only — meeting audio was not shared.",
         "sysAudioEnded": "Meeting-audio sharing stopped. Still recording the microphone.",
         "sysAudioNoAudio": "That screen has no audio to capture. Share the meeting's browser tab and enable audio to include the other participants.",
+        "sysAudioNoLoopback": "The desktop app cannot capture meeting audio on this platform. Open the dashboard in a browser and share the meeting's tab to include the other participants.",
         "sysAudioUnsupported": "This browser cannot capture meeting audio.",
         "taskAddFailed": "Could not add that action item.",
         "taskFileFailed": "Could not file that action item.",

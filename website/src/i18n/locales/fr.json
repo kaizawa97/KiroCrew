@@ -2858,6 +2858,7 @@
         "sysAudioCancelled": "Seul le microphone est enregistré : l'audio de la réunion n'a pas été partagé.",
         "sysAudioEnded": "Le partage de l'audio de la réunion s'est arrêté. Le microphone continue d'être enregistré.",
         "sysAudioNoAudio": "Cet écran n'a pas d'audio. Partagez l'onglet du navigateur de la réunion et activez l'audio pour inclure les autres participants.",
+        "sysAudioNoLoopback": "L'application de bureau ne peut pas capter l'audio de la réunion sur cette plateforme. Ouvrez le tableau de bord dans un navigateur et partagez l'onglet de la réunion pour inclure les autres participants.",
         "sysAudioUnsupported": "Ce navigateur ne peut pas capter l'audio de la réunion.",
         "taskAddFailed": "Impossible d’ajouter cette action.",
         "taskFileFailed": "Impossible d’enregistrer cette action.",

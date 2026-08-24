@@ -1,8 +1,10 @@
 const { describe, it } = require("node:test");
 const assert = require("node:assert/strict");
 const {
+  chooseAudioGrant,
   chooseDisplaySource,
   createDisplayMediaHandler,
+  describeAudioTier,
 } = require("../display-media");
 
 describe("chooseDisplaySource", () => {
@@ -108,5 +110,98 @@ describe("createDisplayMediaHandler", () => {
       granted = streams;
     });
     assert.deepEqual(granted, { video: screenSrc });
+  });
+
+  it("grants a loopback audio device on Windows when audio was requested", async () => {
+    // The meeting-capture win: the handler auto-selects the source, so on Windows
+    // the other participants' audio arrives with no picker at all.
+    let granted;
+    const handler = createDisplayMediaHandler({
+      getSources: async () => [screenSrc],
+      platform: "win32",
+    });
+    await handler({ audioRequested: true }, (streams) => {
+      granted = streams;
+    });
+    assert.deepEqual(granted, { video: screenSrc, audio: "loopback" });
+  });
+
+  it("does NOT attach audio to a video-only request", async () => {
+    // This handler is shared with the chat input's screen-snip tool, which asks for
+    // video only. Attaching a loopback device there would start capturing the
+    // user's system audio to take a screenshot.
+    let granted;
+    const handler = createDisplayMediaHandler({
+      getSources: async () => [screenSrc],
+      platform: "win32",
+    });
+    await handler({ audioRequested: false }, (streams) => {
+      granted = streams;
+    });
+    assert.deepEqual(granted, { video: screenSrc });
+  });
+
+  it("treats a request with no audioRequested field as video-only", async () => {
+    // Every existing caller (and every existing test) passes a bare {}.
+    let granted;
+    const handler = createDisplayMediaHandler({
+      getSources: async () => [screenSrc],
+      platform: "win32",
+    });
+    await handler({}, (streams) => {
+      granted = streams;
+    });
+    assert.deepEqual(granted, { video: screenSrc });
+  });
+
+  it("does not offer loopback audio where Electron cannot supply it", async () => {
+    // electron.d.ts (43.2.0) states a loopback device is currently Windows-only.
+    for (const platform of ["darwin", "linux"]) {
+      let granted;
+      const handler = createDisplayMediaHandler({
+        getSources: async () => [screenSrc],
+        getScreenAccessStatus: () => "granted",
+        platform,
+      });
+      await handler({ audioRequested: true }, (streams) => {
+        granted = streams;
+      });
+      assert.deepEqual(granted, { video: screenSrc }, platform);
+    }
+  });
+});
+
+describe("chooseAudioGrant", () => {
+  it("requires BOTH an audio request and a supporting platform", () => {
+    assert.equal(chooseAudioGrant({ audioRequested: true, platform: "win32" }), "loopback");
+    assert.equal(chooseAudioGrant({ audioRequested: false, platform: "win32" }), undefined);
+    assert.equal(chooseAudioGrant({ audioRequested: true, platform: "darwin" }), undefined);
+    assert.equal(chooseAudioGrant({ audioRequested: true, platform: "linux" }), undefined);
+  });
+
+  it("tolerates a missing or empty options object", () => {
+    assert.equal(chooseAudioGrant(), undefined);
+    assert.equal(chooseAudioGrant({}), undefined);
+  });
+});
+
+describe("describeAudioTier", () => {
+  it("reports loopback where the handler grants a device itself", () => {
+    assert.equal(describeAudioTier({ platform: "win32", useSystemPicker: true }), "loopback");
+    // The flag is irrelevant on Windows — the handler is what grants audio there.
+    assert.equal(describeAudioTier({ platform: "win32", useSystemPicker: false }), "loopback");
+  });
+
+  it("credits the native picker only on macOS, where Electron actually has one", () => {
+    assert.equal(describeAudioTier({ platform: "darwin", useSystemPicker: true }), "system-picker");
+    // Without the flag the handler runs on macOS too, and it cannot grant audio.
+    assert.equal(describeAudioTier({ platform: "darwin", useSystemPicker: false }), "video-only");
+    // useSystemPicker is macOS-only in Electron, so it must not be credited elsewhere.
+    assert.equal(describeAudioTier({ platform: "linux", useSystemPicker: true }), "video-only");
+  });
+
+  it("falls back to video-only for an unknown platform", () => {
+    assert.equal(describeAudioTier({ platform: "freebsd" }), "video-only");
+    assert.equal(describeAudioTier(), "video-only");
   });
 });

@@ -23,8 +23,16 @@
 // audio only on some platforms (notably not macOS). Picking a surface that
 // offers none yields a video-only stream, which is why `'no-audio'` is reported
 // separately from a cancel — the user needs to be told to pick the meeting's TAB
-// and tick "share audio", not that capture failed. The durable fix for the
-// native-app case is an Electron loopback source, which is a separate change.
+// and tick "share audio", not that capture failed.
+//
+// In the Electron shell the picture differs per platform, and `captureTier.ts`
+// resolves which case applies: Windows gets a real loopback device granted by the
+// main process with no picker at all, macOS defers to the native system picker, and
+// a platform with neither cannot produce system audio — there, this module reports
+// `'no-loopback'` WITHOUT prompting, because the Electron handler auto-selects a
+// source and a request could only ever start a screen capture that returns video.
+
+import { detectCaptureTier, tierCanCaptureSystemAudio, type CaptureTier } from './captureTier'
 
 /** The slice of `MediaStreamTrack` this module needs. Structural so tests can fake it. */
 export interface TrackLike {
@@ -131,14 +139,26 @@ export function stopStream(stream: StreamLike | null | undefined): void {
   }
 }
 
-/** Why system audio is unavailable, when it is. */
-export type SystemAudioFailure = 'unsupported' | 'cancelled' | 'no-audio'
+/**
+ * Why system audio is unavailable, when it is.
+ *
+ * `no-loopback` is distinct from `no-audio`: nothing was even attempted, because
+ * the platform cannot produce system audio at all (see `captureTier.ts`). The
+ * user's route forward is different too — not "share a different surface" but
+ * "use the browser instead of the desktop app".
+ */
+export type SystemAudioFailure = 'unsupported' | 'no-loopback' | 'cancelled' | 'no-audio'
 
 export type SystemAudioOutcome<S> = { ok: true; stream: S } | { ok: false; reason: SystemAudioFailure }
 
 export interface SystemAudioDeps<S> {
   getDisplayMedia: (opts: DisplayMediaStreamOptions) => Promise<S>
   supported?: () => boolean
+  /**
+   * The client's capture tier. When it cannot yield audio, the request is skipped
+   * entirely rather than attempted and failed.
+   */
+  tier?: CaptureTier
 }
 
 /** Real browser I/O boundary — the only untested glue here. */
@@ -146,6 +166,7 @@ export function defaultSystemAudioDeps(): SystemAudioDeps<MediaStream> {
   return {
     getDisplayMedia: opts => navigator.mediaDevices.getDisplayMedia(opts),
     supported: () => isSystemAudioSupported(),
+    tier: detectCaptureTier(),
   }
 }
 
@@ -160,6 +181,12 @@ export async function requestSystemAudio<T extends TrackLike, S extends StreamLi
   deps: SystemAudioDeps<S>,
 ): Promise<SystemAudioOutcome<S>> {
   if (deps.supported && !deps.supported()) return { ok: false, reason: 'unsupported' }
+  // Do not ask for what this platform cannot give. On the `video-only` tier the
+  // Electron handler auto-selects a source without a picker, so a request here
+  // would begin capturing the user's screen and return video every time.
+  if (deps.tier && !tierCanCaptureSystemAudio(deps.tier)) {
+    return { ok: false, reason: 'no-loopback' }
+  }
   let stream: S
   try {
     stream = await deps.getDisplayMedia(systemAudioConstraints())

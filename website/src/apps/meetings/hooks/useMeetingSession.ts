@@ -85,6 +85,9 @@ const RECORDING_ERROR_KEY: Record<RecordingErrorCode, string> = {
  */
 const SYSTEM_AUDIO_KEY: Record<SystemAudioFailure, string> = {
   unsupported: 'apps.meetings.session.sysAudioUnsupported',
+  // Nothing was attempted: this platform's desktop build cannot capture system
+  // audio, so the advice is to use the browser rather than to share differently.
+  'no-loopback': 'apps.meetings.session.sysAudioNoLoopback',
   cancelled: 'apps.meetings.session.sysAudioCancelled',
   'no-audio': 'apps.meetings.session.sysAudioNoAudio',
 }
