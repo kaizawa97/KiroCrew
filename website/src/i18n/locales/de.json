@@ -3362,6 +3362,7 @@
         "sttWorkletFailed": "Die Audioverarbeitung konnte nicht gestartet werden.",
         "sysAudioCancelled": "Es wird nur das Mikrofon aufgezeichnet – Meeting-Audio wurde nicht freigegeben.",
         "sysAudioEnded": "Die Freigabe des Meeting-Audios wurde beendet. Das Mikrofon wird weiter aufgezeichnet.",
+        "sysAudioNoLoopback": "Die Desktop-App kann auf dieser Plattform kein Meeting-Audio erfassen. Öffnen Sie das Dashboard im Browser und geben Sie den Tab des Meetings frei, um die anderen Teilnehmer einzubeziehen.",
         "sysAudioNoAudio": "Dieser Bildschirm hat kein Audio. Gib den Browser-Tab des Meetings frei und aktiviere Audio, um die anderen Teilnehmer einzubeziehen.",
         "sysAudioUnavailable": "Meeting-Audio konnte nicht mit der Aufnahme verbunden werden. Es wird nur das Mikrofon aufgezeichnet.",
         "sysAudioUnsupported": "Dieser Browser kann kein Meeting-Audio erfassen.",
