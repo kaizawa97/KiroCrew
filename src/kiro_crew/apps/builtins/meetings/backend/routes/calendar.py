@@ -158,14 +158,32 @@ def _known_provider(body: dict[str, Any]) -> str:
     return provider
 
 
+def credential_schema() -> dict[str, dict[str, Any]]:
+    """What each provider's credential form looks like, for the settings UI.
+
+    Derived from the same two tables the write path enforces
+    (:data:`_CREDENTIAL_FIELDS`, :data:`_OAUTH_CLIENTS`), so the form a user
+    sees and the allowlist a PUT is checked against cannot disagree. A provider
+    absent here takes no credentials.
+    """
+    return {
+        provider: {"fields": list(fields), "oauth": provider in _OAUTH_CLIENTS}
+        for provider, fields in _CREDENTIAL_FIELDS.items()
+    }
+
+
 async def handle_get_calendar_credentials(request: web.Request) -> web.Response:
     """Which providers have credentials, and which fields are filled in.
 
     Field NAMES and booleans only — never a value. A settings page needs to
     render "connected" and "which of these did you fill in", and neither question
     needs the secret. There is deliberately no route that reads one back.
+    ``providers`` carries the per-provider form shape (:func:`credential_schema`)
+    so the page renders the right fields without a second hardcoded list.
     """
-    return web.json_response({"status": await credentials.credential_status()})
+    return web.json_response(
+        {"status": await credentials.credential_status(), "providers": credential_schema()}
+    )
 
 
 async def handle_put_calendar_credentials(request: web.Request) -> web.Response:

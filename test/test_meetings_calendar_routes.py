@@ -314,6 +314,23 @@ class TestCredentialRoutes:
             assert (await resp.json())["status"] == {}
 
     @pytest.mark.asyncio
+    async def test_get_describes_each_providers_form_from_the_allowlist(self, root, enabled, store):
+        """The schema the settings UI renders IS the allowlist the PUT enforces."""
+        async with self._client(root) as client:
+            resp = await client.get(f"{BASE}/calendar/credentials")
+            providers = (await resp.json())["providers"]
+        assert providers == {
+            k.CALENDAR_PROVIDER_CALDAV: {"fields": ["username", "password"], "oauth": False},
+            k.CALENDAR_PROVIDER_GOOGLE: {"fields": ["client_id", "client_secret"], "oauth": True},
+            k.CALENDAR_PROVIDER_MICROSOFT: {
+                "fields": ["client_id", "client_secret"],
+                "oauth": True,
+            },
+        }
+        assert set(providers) == set(calroutes._CREDENTIAL_FIELDS)
+        assert k.CALENDAR_PROVIDER_ICS not in providers
+
+    @pytest.mark.asyncio
     async def test_put_stores_and_reports_names_never_values(self, root, enabled, store):
         async with self._client(root) as client:
             resp = await client.put(
