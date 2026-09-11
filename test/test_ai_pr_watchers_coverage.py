@@ -964,6 +964,14 @@ class TestNudgeLoop:
         **kwargs: Any,
     ) -> tuple[W.PRWatcherRegistry, W.WatcherState]:
         reg = _reg(loop=loop, **kwargs)
+        # `_nudge_loop` re-asserts both hard gates before every pass (D-143), and these
+        # registries inject no `_runner_factory`, so the production check is live here.
+        # Satisfy it: this class is about the LOOP, and the gates have their own tests in
+        # TestMakeRunner (which relies on `_reg()` leaving the flags unset).
+        store.write_json_atomic(
+            store.config_path(),
+            {"watcherAcceptEgressRisk": True, "acceptUnsandboxedAgentRisk": True},
+        )
         state = st or W.WatcherState(
             fp="fp1", pr="https://github.com/o/r/pull/1", max_nudges=3, interval_s=0.0
         )
@@ -1543,8 +1551,17 @@ class TestRunWatcher:
 
 
 class TestMakeRunner:
-    def _accept_egress(self) -> None:
-        store.write_json_atomic(store.config_path(), {"watcherAcceptEgressRisk": True})
+    def _accept_the_gates(self) -> None:
+        """Satisfy BOTH hard preconditions so a test can reach what it is actually about.
+
+        `acceptUnsandboxedAgentRisk` is the credential gate (D-143): the default sandbox tier
+        leaves `~/.config/gh` readable, so `_make_runner` refuses before it builds anything.
+        The gates have their own tests below and in the app suite.
+        """
+        store.write_json_atomic(
+            store.config_path(),
+            {"watcherAcceptEgressRisk": True, "acceptUnsandboxedAgentRisk": True},
+        )
 
     def test_an_injected_factory_short_circuits_the_gate(self) -> None:
         runner = StubRunner()
@@ -1567,7 +1584,7 @@ class TestMakeRunner:
         assert W._watcher_egress_accepted() is False
 
     def test_the_flag_reads_true_only_for_the_boolean(self) -> None:
-        self._accept_egress()
+        self._accept_the_gates()
         assert W._watcher_egress_accepted() is True
 
     def test_no_provider_refuses_the_subprocess_fallback(
@@ -1575,7 +1592,7 @@ class TestMakeRunner:
     ) -> None:
         """Nudging a PR through an unguarded subprocess agent exactly when the platform is
         unhealthy is worse than not nudging it."""
-        self._accept_egress()
+        self._accept_the_gates()
         from kiro_crew.apps.builtins.auto_improvement.spine import agent_runner
 
         class Unavailable:
@@ -1593,7 +1610,7 @@ class TestMakeRunner:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Falling through would bypass the provider's own permission gate."""
-        self._accept_egress()
+        self._accept_the_gates()
         from kiro_crew.apps.builtins.auto_improvement.spine import agent_runner
 
         class Unregisterable:
@@ -1616,7 +1633,7 @@ class TestMakeRunner:
     def test_a_registered_runner_is_wired_to_the_stop_flag_and_the_log(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        self._accept_egress()
+        self._accept_the_gates()
         from kiro_crew.apps.builtins.auto_improvement.spine import agent_runner
 
         built: dict[str, Any] = {}
@@ -1641,6 +1658,11 @@ class TestMakeRunner:
         runner = reg._make_runner(st, stop_ev)
         assert isinstance(runner, Ready)
         assert built["default_timeout_s"] == W.DEFAULT_NUDGE_TIMEOUT_S
+        # The GitHub token variables are emptied for the session on EVERY path (D-143):
+        # `strip_credential_env` runs only in the subprocess spawn this builder refuses, so
+        # without this a gateway `GH_TOKEN` was inherited straight into an unattended turn.
+        assert built["extra_env"] == {name: "" for name in W._GITHUB_CREDENTIAL_ENV_NAMES}
+        assert "GH_TOKEN" in built["extra_env"] and "GITHUB_TOKEN" in built["extra_env"]
         # The stop flag must abort an in-flight turn; otherwise a stop waits out 30 minutes.
         assert built["stop_check"]() is False
         stop_ev.set()

@@ -256,6 +256,9 @@ _FORBIDDEN_SUBCOMMANDS: dict[str, tuple[tuple[str, ...], ...]] = {
     ),
     "git": (
         ("push",),
+        # `send-pack` IS a push — the plumbing command the porcelain `push` drives — so a
+        # denylist naming only `push` left the same capability reachable under its other name.
+        ("send-pack",),
         ("remote", "set-url"),
     ),
 }
@@ -263,6 +266,204 @@ _FORBIDDEN_SUBCOMMANDS: dict[str, tuple[tuple[str, ...], ...]] = {
 #: Binaries a loop/watcher agent must never invoke at all — network fetch and remote shell.
 #: No subcommand analysis needed: the binary itself is the capability.
 _FORBIDDEN_BINARIES = ("curl", "wget", "nc", "ncat", "netcat", "ssh", "scp", "sftp", "telnet")
+
+#: Read-only verbs, per FORGE CLI. For a binary in this table the check INVERTS: a verb path
+#: that matches none of these is REFUSED, instead of only the spellings someone remembered to
+#: deny.
+#:
+#: ``_FORBIDDEN_SUBCOMMANDS`` above is a denylist, and a denylist over a CLI that grows verbs
+#: faster than this file gets re-read cannot hold: `gh alias set`, `gh repo delete`,
+#: `gh repo edit`, `gh gist create`, `gh ssh-key add`, `gh variable set` and `gh pr lock` were
+#: every one of them ALLOWED by it — each an authenticated write under the operator's identity
+#: — and `glab` had no entry at all, so EVERY GitLab verb passed unexamined.
+#:
+#: The forge CLIs are also the only binaries here whose complete legitimate use is
+#: enumerable: the prompts ask for pull-request state, check state and run logs and nothing
+#: else (the app's own publish path builds its argv in ``pr_recipe.py`` and never reaches this
+#: gate). So they get an allowlist, while the rest of the shell keeps the denylist — which is
+#: what running the repository's own build/test/lint needs.
+#:
+#: A PREFIX matches, so per-subcommand flags (`--comments`, `--log-failed`) and positionals
+#: (`12`) after an allowed verb are unconstrained: they cannot change the verb. An invocation
+#: with NO verb at all (`gh`, `gh --version`) is allowed — it performs no action.
+_READONLY_SUBCOMMANDS: dict[str, tuple[tuple[str, ...], ...]] = {
+    "gh": (
+        ("pr", "view"),
+        ("pr", "checks"),
+        ("pr", "diff"),
+        ("pr", "list"),
+        ("pr", "status"),
+        ("run", "view"),
+        ("run", "list"),
+        ("issue", "view"),
+        ("issue", "list"),
+        ("repo", "view"),
+        ("search",),
+        ("label", "list"),
+        ("version",),
+        ("help",),
+    ),
+    "glab": (
+        ("mr", "view"),
+        ("mr", "diff"),
+        ("mr", "list"),
+        ("ci", "view"),
+        ("ci", "list"),
+        ("ci", "status"),
+        ("issue", "view"),
+        ("issue", "list"),
+        ("repo", "view"),
+        ("version",),
+        ("help",),
+    ),
+}
+
+#: GLOBAL options whose value is a CONFIG ASSIGNMENT (`git -c key=value`,
+#: `git --config-env=key=ENVVAR`) rather than an opaque parameter. Their payload is
+#: INSPECTED instead of skipped.
+#:
+#: `-c` sits in :data:`_VALUE_TAKING_OPTIONS`, so its assignment was skipped as a value and
+#: `git -c alias.p=push p https://host/o/r HEAD:main` then compared ``('p',)`` against
+#: ``('push',)`` and passed. An alias defeats every verb in the denylist at once, which is
+#: why this is the one option value that has to be read rather than stepped over.
+_CONFIG_SETTING_OPTIONS: dict[str, frozenset[str]] = {"git": frozenset({"-c", "--config-env"})}
+
+#: Config keys a loop/watcher agent may not set, matched by lowercase prefix (git config keys
+#: are case-insensitive in their section and name). Two families here; the third — anything
+#: naming a PROGRAM git runs — is matched by LEAF instead, see
+#: :data:`_FORBIDDEN_CONFIG_KEY_LEAVES`.
+#:
+#:  * verb RENAMES — ``alias.*`` turns an allowed verb into a forbidden one, so it is not one
+#:    bypass but a bypass of the whole table;
+#:  * credential and remote plumbing — ``credential.*`` (a helper hands out or prints the
+#:    stored token), ``http.*`` (`extraheader` carries an Authorization header), ``url.*``
+#:    and ``remote.*`` (re-point a fetch or push at a live remote), ``include*`` (pulls in a
+#:    whole config file the agent just wrote), ``protocol.allow``/``protocol.ext.*`` (the
+#:    ``ext::`` transport runs a COMMAND as its transport).
+#:
+#: Deliberately ABSENT: ``core.pager``, ``user.*``, ``protocol.version`` and
+#: ``protocol.file.allow`` (the documented CVE-2022-39253 submodule workaround) — the agent
+#: has to be able to read diffs, commit and build, and over-refusing the build is not a fix.
+#: Both tables also refuse a READ of the same key — ``git config --get remote.origin.url``,
+#: ``--get credential.helper``, ``--get core.hooksPath``. Over-refusal in the safe direction,
+#: and nothing the prompts ask for is lost: ``git remote -v`` and ``git remote get-url`` stay
+#: open, and the env forms of the editor keys (``GIT_EDITOR=true git rebase --continue``,
+#: ``GIT_SEQUENCE_EDITOR=``) are leading assignments this gate does not touch, so the
+#: non-interactive rebase idiom still works.
+_FORBIDDEN_CONFIG_KEY_PREFIXES: tuple[str, ...] = (
+    "alias.",
+    "credential.",
+    "http.",
+    "url.",
+    "remote.",
+    "protocol.allow",
+    "protocol.ext.",
+    "include.",
+    "includeif.",
+    "filter.",
+    "pager.",
+    "uploadpack.",
+    "receive.",
+)
+
+#: Final dot-segments of a config key that names a PROGRAM git executes. Matched as a LEAF,
+#: not a prefix, because this family is not prefix-shaped: ``diff.<driver>.command``,
+#: ``merge.<driver>.driver``, ``difftool.<t>.cmd`` and ``gpg.ssh.program`` all carry a
+#: user-chosen middle segment, so a prefix table closed ``diff.external`` while leaving
+#: ``diff.d.command`` open — measured. This matters beyond the sandbox: this app's post-turn
+#: ``git status``/``diff`` runs on the HOST, outside it, which is the same hazard
+#: ``GIT_SAFE_CONFIG`` pins away on our own argv and a config the agent wrote would
+#: reintroduce.
+#:
+#: SCOPE, stated narrowly on purpose: these are the MIDDLE-SEGMENT spellings a prefix cannot
+#: reach. This set is not a proof that no other key reaches a program — ``core.pager`` is
+#: deliberately left open because ``git -c core.pager=cat diff`` is ordinary diff reading and
+#: is pinned allowed by test, and whatever else git grows next is residual for the same
+#: reason the env-substitution family is (see :func:`_config_env_refusal`). The boundary is
+#: the watcher's credential gate, not this table's completeness.
+_FORBIDDEN_CONFIG_KEY_LEAVES: frozenset[str] = frozenset(
+    {
+        "command",
+        "cmd",
+        "textconv",
+        "driver",
+        "program",
+        "editor",
+        "browser",
+        "viewer",
+        "helper",
+        "askpass",
+        "proxy",
+        "gitproxy",
+        "sshcommand",
+        "fsmonitor",
+        "hookspath",
+        "external",
+        "variant",
+        # A template DIRECTORY, not a program, but `init.templateDir` seeds `hooks/` into a
+        # new repository — the same host-side execution `core.hooksPath` buys.
+        "templatedir",
+        # Named spellings a leaf rule over the words above does not reach:
+        # `core.alternateRefsCommand` runs on `git log`/`for-each-ref`,
+        # `interactive.diffFilter` on `git add -p`, `sendemail.smtpServer` accepts a command
+        # path. All measured open before adding them.
+        "alternaterefscommand",
+        "difffilter",
+        "smtpserver",
+        # `submodule.<name>.url` re-points a submodule at a live remote, which the `url.`
+        # and `remote.` prefixes do not reach.
+        "url",
+    }
+)
+
+#: Environment variables that hand git a whole CONFIG FILE. Refused whatever their value:
+#: the file is one the agent's own ``Write`` tool can author, so its CONTENT is not in the
+#: command line and no key check can see it — the same subject problem as ``bash fix.sh``,
+#: except here the variable itself IS in the command line and can simply be refused.
+_GIT_CONFIG_FILE_ENV_NAMES: frozenset[str] = frozenset(
+    {"GIT_CONFIG", "GIT_CONFIG_GLOBAL", "GIT_CONFIG_SYSTEM"}
+)
+
+
+def _forbidden_config_key(key: str) -> bool:
+    """Whether *key* (already lowercased) is a git config key this agent may not set."""
+    return key.startswith(_FORBIDDEN_CONFIG_KEY_PREFIXES) or (
+        key.rsplit(".", 1)[-1] in _FORBIDDEN_CONFIG_KEY_LEAVES and "." in key
+    )
+
+
+def _config_env_refusal(assignment: str) -> str:
+    """A reason when a leading ``VAR=value`` word injects git configuration.
+
+    The tokenizer DROPS leading ``VAR=value`` words before reading the binary, because they
+    are the environment and not the command — but several of them ARE config. Measured, all
+    of ``GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.x GIT_CONFIG_VALUE_0=version git x``,
+    ``GIT_CONFIG_PARAMETERS="'alias.x=version'" git x`` and
+    ``GIT_CONFIG_GLOBAL=<file the agent wrote> git x`` ran the aliased verb, so an assignment
+    dropped unread is the same verb rename ``git -c alias.x=…`` performs. Their values are
+    inspected here instead of discarded.
+
+    Same subject as the rest of this gate — the text IS the command line — so these are table
+    entries, not a spelling chase over a document the matcher cannot see. What is NOT here,
+    and is residual on purpose, is the env-based program substitution family
+    (``GIT_SSH_COMMAND``, ``GIT_EXTERNAL_DIFF``, ``LD_PRELOAD``, …): that is unbounded, and
+    what makes it inert is the credential gate, not another name.
+    """
+    name, sep, value = assignment.partition("=")
+    if not sep:
+        return ""
+    upper = name.upper()
+    if upper in _GIT_CONFIG_FILE_ENV_NAMES:
+        return f"{name} cannot point git at another configuration file here"
+    if upper != "GIT_CONFIG_PARAMETERS" and not upper.startswith("GIT_CONFIG_KEY_"):
+        return ""
+    # `GIT_CONFIG_PARAMETERS` packs several quoted `key=value` pairs into one value; the
+    # `_KEY_<n>` form holds a bare key. Splitting on quotes and whitespace covers both.
+    for fragment in value.replace("'", " ").replace('"', " ").split():
+        key = fragment.split("=", 1)[0].strip().lower()
+        if _forbidden_config_key(key):
+            return f"the {name} assignment cannot set the {key!r} git configuration here"
+    return ""
 
 
 def _shell_words(command: str) -> list[str]:
@@ -310,6 +511,20 @@ _COMMAND_WRAPPERS: dict[str, int] = {
     "command": 0,
     "exec": 0,
     "builtin": 0,
+    # `eval "git push origin HEAD"` re-parses its argument as a command, so it is the same
+    # nesting `sh -c` performs and was ALLOWED while the bare verb was refused (measured) —
+    # the identical hole `command`/`exec`/`builtin` above were added for.
+    "eval": 0,
+    # ASSIGNMENT builtins. `export GIT_CONFIG_KEY_0=alias.p` in one segment renames a verb
+    # for a `git p` in the NEXT segment, and the leading-`VAR=value` scan only fires when
+    # `words[0]` itself carries the `=`. Listing them here routes their assignments through
+    # the same `_config_env_refusal` the inline form gets. Measured: `export GIT_CONFIG_COUNT=1
+    # GIT_CONFIG_KEY_0=alias.p GIT_CONFIG_VALUE_0=push; git p <url> HEAD:main` was ALLOWED
+    # while `set -a; GIT_CONFIG_KEY_0=alias.p; git p` was refused.
+    "export": 0,
+    "declare": 0,
+    "typeset": 0,
+    "readonly": 0,
 }
 
 #: Wrapper LONG options that consume the FOLLOWING word as a separate value. Short options
@@ -347,9 +562,23 @@ def shell_command_refusal(command: object) -> str:
     gets checked: ``gh --repo o/r pr ready`` is refused exactly like ``gh pr ready``. Also
     splits on shell separators, so a forbidden verb cannot hide behind ``&&``/``;``/``|``.
 
-    Errs toward refusal — for a denylist that is the safe direction — but the read-only
-    diagnostics the watcher's own prompt asks for (``gh pr checks``,
+    Two regimes, deliberately: the FORGE CLIs (``gh``, ``glab``) are checked against an
+    ALLOWLIST of read-only verbs (:data:`_READONLY_SUBCOMMANDS`), because their whole
+    legitimate use here is enumerable and a denylist over them kept losing to the next verb
+    name; everything else keeps the denylist, because the agent's job is to run the
+    repository's own build/test/lint and those commands cannot be enumerated.
+
+    Errs toward refusal — for a gate on an unattended agent that is the safe direction — but
+    the read-only diagnostics the watcher's own prompt asks for (``gh pr checks``,
     ``gh pr view --comments``, ``gh run view --log-failed``) are pinned by test.
+
+    NOT A BOUNDARY, and never treat it as one. It gates the command a request ASKS for, not
+    what that command then does: ``bash fix.sh`` and ``python3 helper.py`` name a file this
+    same agent's ``Write`` tool authored, and no matcher over a command LINE can read that
+    file. Chasing those spellings only narrows an unbounded set by one each time. The
+    boundary is that a watcher turn holds no credential worth reaching — see
+    ``pr_watchers._make_runner``'s credential gate — and, for the working tree, the dead
+    origin that ``_verify_isolation`` re-asserts after every turn.
     """
     return _refusal(str(command or ""), depth=0)
 
@@ -384,12 +613,22 @@ def _refusal(text: str, *, depth: int) -> str:
     normalized = normalized.replace("(", "\n").replace(")", "\n")
     for segment in normalized.splitlines():
         words = _shell_words(segment)
-        # Drop leading VAR=value assignments (`GH_TOKEN=x gh api …`).
+        # Drop leading VAR=value assignments (`GH_TOKEN=x gh api …`) — after asking whether
+        # the assignment is itself git CONFIG (see `_config_env_refusal`).
         while words and "=" in words[0] and not words[0].startswith("-"):
+            reason = _config_env_refusal(words[0])
+            if reason:
+                return reason
             words = words[1:]
         if not words:
             continue
         binary = words[0].rsplit("/", 1)[-1].lower()
+        if binary.startswith("git-") and len(binary) > 4:
+            # A DASHED builtin is the same command: `/usr/lib/git-core/git-push origin main`
+            # pushes, and 166 of these ship in git 2.43's exec-path on this host. Rewritten to
+            # the `git <verb>` form so one table judges both spellings.
+            words = ["git", binary[4:], *words[1:]]
+            binary = "git"
 
         # A shell's `-c` argument is a nested script: re-analyze it from the top so
         # separators and further wrappers inside it are seen too.
@@ -406,6 +645,29 @@ def _refusal(text: str, *, depth: int) -> str:
 
         # A wrapper runs the command that follows it, so check that command instead.
         if binary in _COMMAND_WRAPPERS:
+            # `-S`/`--split-string` takes a whole COMMAND as one argument, exactly like a
+            # shell's `-c`, so its value is re-analyzed from the top rather than stepped over
+            # as an opaque option value. Measured: `env -S'git push'` runs the push, and the
+            # generic option-stripping below read `-Sgit push` as one option and then consumed
+            # the (absent) following word, leaving nothing to check.
+            for i, word in enumerate(words[1:], start=1):
+                if word.startswith("--split-string="):
+                    head = word.split("=", 1)[1]
+                elif word in ("-S", "--split-string"):
+                    head = ""
+                elif word.startswith("-S") and not word.startswith("--"):
+                    head = word[2:]
+                else:
+                    continue
+                # The split value is only the HEAD of the command: `env` appends the
+                # remaining argv words to it, so `env -Sgit push` runs `git push` with the
+                # verb inside the option and its argument outside. Both halves are rejoined
+                # before analysis, or the verb alone would look harmless.
+                inner = " ".join([head, *words[i + 1 :]]).strip()
+                reason = _refusal(inner, depth=depth + 1)
+                if reason:
+                    return reason
+                break
             wrapped = list(words[1:])
             # Drop the wrapper's own options and any fixed positional it consumes
             # (`timeout <duration> cmd`), plus VAR=value pairs after `env`.
@@ -432,17 +694,43 @@ def _refusal(text: str, *, depth: int) -> str:
                 wrapped = wrapped[1:]
                 for _ in range(takes_value):
                     if wrapped and not wrapped[0].startswith("-"):
+                        # A git-config ASSIGNMENT is never a value worth swallowing:
+                        # `declare -x GIT_CONFIG_KEY_0=alias.p` otherwise consumed the verb
+                        # rename as `-x`'s value and dropped it unread.
+                        reason = _config_env_refusal(wrapped[0])
+                        if reason:
+                            return reason
                         # Only consume it if it is not itself a command we know — otherwise a
                         # crafted `env --unset curl git push` would eat the very binary we must
                         # inspect. A recognized command is left in place to be checked.
                         nxt = wrapped[0].rsplit("/", 1)[-1].lower()
-                        if nxt in _FORBIDDEN_SUBCOMMANDS or nxt in _FORBIDDEN_BINARIES:
+                        # EVERY table that judges a binary belongs here, not just the two
+                        # deny ones: a valueless wrapper option otherwise eats the binary
+                        # they guard. Measured — `stdbuf -o0 glab mr merge 3`, `env -i glab
+                        # …` and `sudo -i glab …` were ALLOWED (the allow table was missing),
+                        # and so were `env -i sh -c 'git push'`, `stdbuf -o0 bash -c 'curl
+                        # http://evil/'` and `xargs -I{} sh -c 'git push'` (the SHELL table
+                        # was missing, which subsumes the rest: everything reachable through
+                        # `sh -c` is reachable behind one valueless option). `-i`/`-o0`/
+                        # `-I{}`/`-x`/`-p` are all real valueless options of these wrappers,
+                        # and once `sh` was consumed its own `-c` was read as another
+                        # value-taking option that swallowed the whole script.
+                        if (
+                            nxt in _FORBIDDEN_SUBCOMMANDS
+                            or nxt in _READONLY_SUBCOMMANDS
+                            or nxt in _FORBIDDEN_BINARIES
+                            or nxt in _SHELL_BINARIES
+                            or nxt in _COMMAND_WRAPPERS
+                        ):
                             break
                         wrapped = wrapped[1:]
             for _ in range(_COMMAND_WRAPPERS[binary]):
                 if wrapped:
                     wrapped = wrapped[1:]
             while wrapped and "=" in wrapped[0] and not wrapped[0].startswith("-"):
+                reason = _config_env_refusal(wrapped[0])
+                if reason:
+                    return reason
                 wrapped = wrapped[1:]
             if wrapped:
                 reason = _refusal(" ".join(wrapped), depth=depth + 1)
@@ -451,16 +739,24 @@ def _refusal(text: str, *, depth: int) -> str:
             continue
         if binary in _FORBIDDEN_BINARIES:
             return f"{binary!r} cannot be run here"
-        forbidden = _FORBIDDEN_SUBCOMMANDS.get(binary)
-        if not forbidden:
+        forbidden = _FORBIDDEN_SUBCOMMANDS.get(binary, ())
+        readonly = _READONLY_SUBCOMMANDS.get(binary, ())
+        config_options = _CONFIG_SETTING_OPTIONS.get(binary, frozenset())
+        if not forbidden and not readonly and not config_options:
             continue
         # Skip global options (and their values) to reach the real subcommand path.
         rest: list[str] = []
-        skip_next = False
+        pending_value_for: str | None = None
+        # `-c key=value` / `--config-env=key=ENVVAR` payloads, both spellings.
+        config_assignments: list[str] = []
         value_taking = _VALUE_TAKING_OPTIONS.get(binary, frozenset())
         for word in words[1:]:
-            if skip_next:
-                skip_next = False
+            if pending_value_for is not None:
+                # A CONFIG ASSIGNMENT is read, not stepped over — see
+                # `_CONFIG_SETTING_OPTIONS` for why this one option value cannot be opaque.
+                if pending_value_for in config_options:
+                    config_assignments.append(word)
+                pending_value_for = None
                 continue
             if word.startswith("-"):
                 # Only skip the NEXT word for options actually known to take a value. The
@@ -473,12 +769,30 @@ def _refusal(text: str, *, depth: int) -> str:
                 # valueless, which over-matches at worst (a stray value could be read as a
                 # subcommand and refuse a benign command) — the safe direction for a denylist.
                 # `--opt=value` never consumes the next word. Raised by the GPT review.
-                skip_next = "=" not in word and word.split("=", 1)[0] in value_taking
+                name, sep, inline = word.partition("=")
+                if sep and name in config_options:
+                    config_assignments.append(inline)
+                elif not sep and name in value_taking:
+                    pending_value_for = name
                 continue
             rest.append(word.lower())
+        if rest[:1] == ["config"] and config_options:
+            # `git config alias.p push` PERSISTS in the repository the rename `-c` applies for
+            # one invocation, so the same keys are refused whichever way they are set. Read as
+            # well as write: `rest` carries the key positionally either way, and refusing a
+            # `--get` of a credential helper over-refuses in the safe direction.
+            config_assignments.extend(rest[1:])
+        for assignment in config_assignments:
+            key = assignment.split("=", 1)[0].strip().lower()
+            if _forbidden_config_key(key):
+                return f"{binary} cannot set the {key!r} configuration here"
         for path in forbidden:
             if tuple(rest[: len(path)]) == path:
                 return f"{binary} {' '.join(path)} cannot mutate state here"
+        if readonly and rest and not any(tuple(rest[: len(p)]) == p for p in readonly):
+            # Names only table constants. Every other reason in this gate does too, and the
+            # rejected argv is agent-chosen text that ends up in the operator's feed.
+            return f"{binary} may run only its read-only commands here"
     return ""
 
 
@@ -1153,6 +1467,7 @@ class SessionAgentRunner:
         stop_check=None,
         on_activity=None,
         provider_factory=None,
+        extra_env: dict[str, str] | None = None,
     ) -> None:
         self.model = model
         # The KIRO AGENT this runner drives. It MUST be an app agent whose tool set
@@ -1172,6 +1487,11 @@ class SessionAgentRunner:
         # tests; resolved lazily from config when None so importing this module never loads
         # the whole config/provider stack.
         self._provider_factory = provider_factory
+        # Per-session environment the provider merges over the gateway's own. It
+        # NEUTRALIZES credential variables this agent has no claim on (the watcher's
+        # `_github_credential_env_scrub`). Per-session rather than an `os.environ` edit,
+        # which is process-global and shared with the gateway's own authenticated reads.
+        self._extra_env = dict(extra_env or {})
 
     def total_cost_usd(self) -> float:
         with self._cost_lock:
@@ -1359,9 +1679,30 @@ class SessionAgentRunner:
         provider = None
         try:
             try:
-                provider = factory(session_key, agent=self.agent_name, cwd=cwd)
+                if self._extra_env:
+                    provider = factory(
+                        session_key,
+                        agent=self.agent_name,
+                        cwd=cwd,
+                        extra_env=dict(self._extra_env),
+                    )
+                else:
+                    provider = factory(session_key, agent=self.agent_name, cwd=cwd)
             except TypeError:
                 # Older/other factories may not accept cwd / agent kwargs.
+                #
+                # FAIL CLOSED when an environment scrub was requested: the caller passed
+                # `extra_env` precisely so a credential does NOT reach this unattended turn,
+                # and retrying with fewer kwargs would hand it over while looking like
+                # graceful degradation. Refusing surfaces as a failed pass (the caller's
+                # contract), never as a pass that ran unscrubbed.
+                if self._extra_env:
+                    raise RuntimeError(
+                        "the provider factory does not accept `extra_env`, so the "
+                        "credential scrub this runner requires could not be applied — "
+                        "refusing to run the turn with the gateway's credential "
+                        "environment visible"
+                    ) from None
                 try:
                     provider = factory(session_key, agent=self.agent_name)
                 except TypeError:

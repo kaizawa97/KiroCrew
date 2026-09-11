@@ -173,18 +173,45 @@ class RunState:
 _UNSCANNED = "[withheld: redaction unavailable]"
 
 
+#: Sandbox tiers whose hidden-directory list covers EVERY credential store an unattended
+#: agent could reach — ``~/.aws``, ``~/.config/gh``, ``~/.config/gcloud``, ``~/.kube``,
+#: ``~/.gnupg``.
+#:
+#: ``strict`` alone, and the omissions are the point. ``.config/gh`` occurs EXACTLY ONCE in
+#: ``sandbox.py``, inside ``_STRICT_DIRS``: ``_CC_DIRS`` hides ``.aws``/``.kube``/``.gnupg``
+#: but NOT the GitHub store (and on macOS at ``cc``, ``.aws/config`` is deliberately exposed
+#: again for Bedrock auth), while ``_STANDARD_DIRS`` — and its alias ``auto``, the shipped
+#: default — hides none of the three, leaving them readable for kiro-cli's own authentication
+#: and interactive workflow use. Safe for human-driven chat; not for unattended execution over
+#: repository- or pull-request-controlled text.
+#:
+#: Admitting ``cc`` here is therefore not a looser choice but a WRONG one: it would clear the
+#: gate on a host where a governed ``sandbox.min_level: "cc"`` floor leaves
+#: ``~/.config/gh/hosts.yml`` readable, which is the whole defect this gate exists to close.
+#: Pinned against ``sandbox``'s own tier lists by
+#: ``test_the_credential_hiding_tiers_are_the_ones_that_hide_the_gh_store``.
+_CREDENTIAL_HIDING_SANDBOX_MODES = frozenset({"strict"})
+
+
 def _credentials_are_unconfined() -> str:
     """A REASON string when a provider-driven agent would run without credential masking.
 
     Empty string means "confined, safe to run". The app's subprocess path forces
     ``sandboxed_spawn_argv(mode="strict")`` + ``strip_credential_env``; the provider path
-    inherits the gateway's ``sandbox`` setting instead. Only ``"cc"`` and ``"strict"``
-    profiles hide credential stores (``~/.aws``, ``~/.ssh``, ``~/.config/gh``, ``~/.kube``);
-    the default ``"auto"``/``"standard"`` intentionally exposes ``.aws/.ssh`` for
-    interactive workflow use — safe for human-driven chat, but NOT for unattended
-    repository-controlled execution where a crafted instruction could read credentials.
+    inherits the gateway's ``agent.sandbox`` tier instead, and only
+    :data:`_CREDENTIAL_HIDING_SANDBOX_MODES` hide the credential stores.
 
-    FAIL CLOSED on an unreadable config: a state we cannot verify is treated as unconfined,
+    Asks the SANDBOX module for both halves of the answer rather than re-deriving either:
+    :func:`sandbox.configured_sandbox_mode` for the tier the ACP spawn will actually be
+    given, :func:`sandbox.effective_sandbox_mode` so a governed ``sandbox.min_level`` floor
+    that raises it is honoured, and :func:`sandbox.credential_mask_applies` because several
+    ``wrap_argv`` paths hand back an UNWRAPPED child (the ``off`` tier, a backend-less host
+    with unsandboxed exec opted in, an outer sandbox) — on those the tier name says
+    "confined" and the mask never lands. The previous version read a non-existent top-level
+    ``KiroCrewConfig.sandbox`` attribute, so it reported every gateway "unset" and never
+    consulted the tier it named.
+
+    FAIL CLOSED on anything unreadable: a state we cannot verify is treated as unconfined,
     because the alternative is running an agent over repository-controlled text with the
     operator's credentials visible.
 
@@ -193,27 +220,51 @@ def _credentials_are_unconfined() -> str:
     one-time-consent shape as the watcher's ``watcherAcceptEgressRisk`` (D-118). That escape
     hatch exists so a hard refusal doesn't silently take the loop offline rather than
     telling the operator what to decide. Raised by the GPT review.
+
+    Shared with ``pr_watchers._make_runner`` (D-143), which had no tier check at all: one
+    definition, so the two unattended runners cannot disagree about what confinement means.
     """
-    if _unsandboxed_agent_accepted():
+    try:
+        accepted = _unsandboxed_agent_accepted()
+    except Exception:  # noqa: BLE001 — an acknowledgement we cannot read is not one
+        accepted = False
+    if accepted:
         return ""
     try:
-        from kiro_crew.config import KiroCrewConfig
+        from kiro_crew.sandbox import configured_sandbox_mode, effective_sandbox_mode
 
-        mode = str(getattr(KiroCrewConfig.load(), "sandbox", "") or "").strip().lower()
+        configured = configured_sandbox_mode()
+        mode = str(effective_sandbox_mode(configured) or "").strip().lower()
     except Exception as exc:  # noqa: BLE001 — an unverifiable sandbox is an unconfined one
         return f"the gateway sandbox setting could not be read ({type(exc).__name__})"
-    # The provider path runs repository-controlled text through an agent with
-    # auto-approved shell, so it requires a sandbox level that HIDES credential
-    # stores (~/.aws, ~/.ssh, ~/.config/gh, ~/.kube). Only 'cc' and 'strict'
-    # do this; 'auto'/'standard' intentionally EXPOSE .aws/.ssh for interactive
-    # workflow use — safe for human-driven chat, but not for unattended
-    # repo-controlled execution.
-    _CREDENTIAL_HIDING_MODES = {"cc", "strict"}
-    if mode not in _CREDENTIAL_HIDING_MODES:
+    if mode not in _CREDENTIAL_HIDING_SANDBOX_MODES:
+        # Names the remedies that are actually REACHABLE. `agent.sandbox`'s own enum is
+        # `auto`/`off` and out-of-enum values are reset to the default by config validation,
+        # so the tier can only be raised from the keystone — a governed
+        # `sandbox.min_level: "strict"` in `security_policy.json`, which `wrap_argv` clamps
+        # every caller's mode up to. Telling the operator to "set agent.sandbox to strict"
+        # would name something the schema rejects.
         return (
-            f"the gateway sandbox is {mode or 'unset'!r} — the auto-improvement "
-            f"provider path requires 'cc' or 'strict' (credential-hiding profiles) "
-            f"or the explicit acceptUnsandboxedAgentRisk opt-in"
+            f"the effective gateway sandbox tier is {mode or 'unset'!r}, which leaves "
+            f"~/.config/gh and ~/.aws readable — an unattended agent needs a "
+            f"credential-hiding tier "
+            f"({', '.join(sorted(_CREDENTIAL_HIDING_SANDBOX_MODES))}, reachable only as a "
+            f"governed sandbox.min_level floor) or the explicit "
+            f"acceptUnsandboxedAgentRisk opt-in"
+        )
+    # The tier NAMES a mask; this asks whether it would actually land on this host. Checked
+    # second so the common refusal above never pays for the backend probe.
+    try:
+        from kiro_crew.sandbox import credential_mask_applies
+
+        masked = bool(credential_mask_applies(configured))
+    except Exception as exc:  # noqa: BLE001 — same posture as the read above
+        return f"the sandbox credential mask could not be verified ({type(exc).__name__})"
+    if not masked:
+        return (
+            f"the effective gateway sandbox tier is {mode!r} but this host applies no "
+            f"credential mask (no sandbox backend, or an outer sandbox built for another "
+            f"tier), so the stores stay readable"
         )
     return ""
 
@@ -457,25 +508,26 @@ class RunSupervisor:
             # `sandboxed_spawn_argv(mode="strict")` + `strip_credential_env`, which hides
             # `~/.aws`, `~/.gnupg`, `gh`/`gcloud`/`kube` config and scrubs the token env. The
             # PROVIDER path does not: it drives a Kiro Crew session, so isolation is whatever
-            # `cfg.sandbox` says — and that field DEFAULTS TO "off" ("defers isolation to
-            # kiro-cli's internal agent sandbox"). On a gateway where kiro-cli provides no
-            # sandbox, an injected repository instruction reaching the agent's auto-approved
-            # Bash (`python helper.py`) could read those credential stores and exfiltrate over
-            # an unrestricted network. Refuse rather than run unconfined: `None` means OFFLINE
-            # (no fabricated fixes), which is the same fail-closed answer this method already
-            # gives when the tool-restricted agent cannot be registered. Raised by the GPT
-            # review. The watcher path is gated separately and explicitly
-            # (`pr_watchers._watcher_egress_accepted`, D-118) because it genuinely needs `gh`
-            # network access; the loop's authoring agent does not.
+            # `agent.sandbox` gives — and that field defaults to `auto`, i.e. the `standard`
+            # tier, which hides none of those three stores. An injected repository instruction
+            # reaching the agent's auto-approved Bash (`python helper.py`) could read them and
+            # exfiltrate over an unrestricted network. Refuse rather than run unconfined:
+            # `None` means OFFLINE (no fabricated fixes), which is the same fail-closed answer
+            # this method already gives when the tool-restricted agent cannot be registered.
+            # Raised by the GPT review. The watcher path runs this SAME check (D-143) plus its
+            # own egress acknowledgement (`pr_watchers._watcher_egress_accepted`, D-118),
+            # because it genuinely needs `gh` network access; the loop's authoring agent does
+            # not.
             unconfined = _credentials_are_unconfined()
             if unconfined:
                 logger.warning(
                     "%s: refusing the provider-backed agent runner — %s, so an agent-run "
                     "command could read credential stores and exfiltrate. Running OFFLINE. "
-                    "Set the gateway's `sandbox` to 'auto' to re-enable the OS-level sandbox, "
-                    "or set `acceptUnsandboxedAgentRisk` to acknowledge the residual risk.",
+                    "Raise the tier with a governed `sandbox.min_level: %s` floor, or set "
+                    "`acceptUnsandboxedAgentRisk` to acknowledge the residual risk.",
                     store.APP_NAME,
                     unconfined,
+                    ", ".join(sorted(_CREDENTIAL_HIDING_SANDBOX_MODES)),
                 )
                 self._offline_reason = (
                     f"the provider-backed agent runner was refused because {unconfined}"

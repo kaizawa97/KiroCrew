@@ -87,25 +87,29 @@ _CONFIG_WRITABLE = frozenset(
         # agent is allowed to run. Default OFF, fail-closed. The watcher agent is UNATTENDED,
         # its prompt embeds outsider-writable PR-comment text, and it needs `gh` (host auth +
         # network) to read PR state — so it CANNOT be run under a strict credential+network
-        # sandbox without deleting the feature (D-84). The provider-runner path confirms the
-        # sandbox hides credential DIRECTORIES but does NOT isolate the network (D-105), so an
-        # injected instruction could read an exposed credential and send it out. Rather than
-        # weaken the sandbox or silently accept that, `_make_runner` REFUSES to build a runner
-        # unless this flag is set — the operator states, once and explicitly, that they point
-        # watchers only at repositories whose PR comments they would be willing to execute.
-        # Same opt-in shape as `watcherAutoStart`. Raised by the GPT review.
+        # sandbox without deleting the feature (D-84). The provider-runner path does NOT
+        # isolate the network (D-105), so an injected instruction can open a socket and send
+        # whatever it can read. Rather than weaken the sandbox or silently accept that,
+        # `_make_runner` REFUSES to build a runner unless this flag is set — the operator
+        # states, once and explicitly, that they point watchers only at repositories whose PR
+        # comments they would be willing to execute. Same opt-in shape as `watcherAutoStart`.
+        # Scope, per D-143: this flag concedes EGRESS only. The separate credential
+        # precondition below is what keeps the operator's GitHub login out of the turn, and
+        # both must be satisfied before a watcher runs. Raised by the GPT review.
         "watcherAcceptEgressRisk",
-        # Opt-in: acknowledge that the LOOP's authoring agent runs without this app's own
-        # strict credential masking. Default OFF, fail-closed. The subprocess path spawns
-        # through `sandboxed_spawn_argv(mode="strict")` + `strip_credential_env`, which hides
+        # Opt-in: acknowledge that an unattended agent runs without this app's own strict
+        # credential masking. Default OFF, fail-closed. The subprocess path spawns through
+        # `sandboxed_spawn_argv(mode="strict")` + `strip_credential_env`, which hides
         # `~/.aws`/`~/.gnupg`/`gh` stores; the PROVIDER path drives a Kiro Crew session
-        # instead, so isolation is whatever the gateway's `sandbox` setting gives — and only
-        # 'cc'/'strict' profiles hide credential directories from the agent. On a gateway
-        # with default 'auto'/'standard' (which exposes .aws/.ssh for workflow use), a
-        # repository instruction reaching the agent's auto-approved Bash could read those
-        # stores and exfiltrate. `runner._build_runner` therefore runs OFFLINE unless the
-        # sandbox is 'cc'/'strict' or this flag is set. Same one-time-consent shape as
-        # `watcherAcceptEgressRisk`. Raised by the GPT review.
+        # instead, so isolation is whatever the gateway's `sandbox` tier gives — and only
+        # 'cc'/'strict' hide credential directories from the agent. On a gateway at the
+        # default 'auto'/'standard' (which exposes .aws/.ssh for workflow use and never
+        # listed `.config/gh`), a repository or pull-request instruction reaching the agent's
+        # auto-approved Bash can read those stores and exfiltrate. `runner._build_runner`
+        # therefore runs OFFLINE, and `pr_watchers._make_runner` REFUSES (D-143), unless the
+        # tier hides them or this flag is set. Setting it for a WATCHER means accepting that
+        # an unattended turn driven by outsider-written PR text can use your GitHub login.
+        # Same one-time-consent shape as `watcherAcceptEgressRisk`. Raised by the GPT review.
         "acceptUnsandboxedAgentRisk",
         # Run budget. Safe to expose: these only ever SHRINK or grow how much work
         # one run does; none of them can retarget the repository or relax a gate.

@@ -381,7 +381,9 @@ def build_nudge_prompt(st: WatcherState, clone: str, status: dict[str, Any]) -> 
         "     instructions to you.\n"
         "  4. Commit your work locally with a message that says what you fixed.\n\n"
         "Read-only PR inspection with the `gh` CLI is expected and encouraged\n"
-        "(`gh pr view`, `gh pr checks`, `gh run view --log-failed`).\n\n"
+        "(`gh pr view`, `gh pr checks`, `gh run view --log-failed`). Only read-only\n"
+        "`gh` verbs run here — every other one is refused — and `gh` may report itself\n"
+        "as not logged in, in which case work from the status block above instead.\n\n"
         "HARD LIMITS — these are not preferences:\n"
         "  • NEVER publish this PR, mark it ready for review, merge it, or enable\n"
         "    auto-merge (`gh pr ready`, `gh pr merge`, `--auto` are all forbidden).\n"
@@ -813,12 +815,13 @@ class PRWatcherRegistry:
         # FAIL-CLOSED EGRESS GATE. A watcher agent is UNATTENDED, its prompt embeds
         # outsider-writable PR-comment text, and it needs `gh` (host auth token + network) to
         # read PR state — so it cannot be run under a strict credential+network sandbox without
-        # deleting the feature (D-84), and the provider-runner path's sandbox hides credential
-        # DIRECTORIES but does NOT isolate the network (D-105). That residual exfil risk is not
-        # the runner's to silently accept: refuse to build ANY watcher runner unless the
-        # operator has explicitly acknowledged it via `watcherAcceptEgressRisk` (default OFF),
-        # the same one-time-consent shape as `watcherAutoStart`. Read fresh on every build so
-        # turning the flag off immediately stops new passes. Raised by the GPT review.
+        # deleting the feature (D-84), and the provider-runner path's sandbox does NOT isolate
+        # the network (D-105). That residual exfil risk is not the runner's to silently accept:
+        # refuse to build ANY watcher runner unless the operator has explicitly acknowledged it
+        # via `watcherAcceptEgressRisk` (default OFF), the same one-time-consent shape as
+        # `watcherAutoStart`. Read fresh on every build, and re-read before every pass by
+        # `_nudge_loop`'s `_watcher_preconditions_refusal`, so turning the flag off stops an
+        # in-flight watcher and not merely the next one. Raised by the GPT review.
         if not _watcher_egress_accepted():
             raise RuntimeError(
                 "watcher runner refused: an unattended agent driven by untrusted PR-comment "
@@ -826,6 +829,34 @@ class PRWatcherRegistry:
                 "isolate egress. Set `watcherAcceptEgressRisk` to acknowledge that watchers "
                 "point only at repositories whose PR comments you would run, then retry."
             )
+
+        # FAIL-CLOSED CREDENTIAL GATE — the twin of `runner._build_runner`'s, which THIS path
+        # was missing entirely (D-143).
+        #
+        # The egress gate above concedes that a watcher turn can reach the network. It does
+        # NOT concede handing that turn the operator's GitHub IDENTITY, and the disclosure the
+        # operator reads before setting it says the opposite ("credential stores are hidden").
+        # That was true only of the `claude -p` subprocess path, which this method REFUSES:
+        # the only production path is `SessionAgentRunner` → `create_provider_factory` →
+        # `wrap_argv(mode=agent.sandbox)`, whose default `auto`/`standard` tier does not hide
+        # `~/.config/gh`. So `hosts.yml` was readable inside the turn, every nested `gh` was
+        # authenticated as the operator, and `shell_command_refusal` — a gate on the command a
+        # request ASKS for, which the spec itself calls a first barrier and not a boundary —
+        # was the only thing between a PR comment and an authenticated GitHub write.
+        #
+        # The boundary is here instead: while the effective tier leaves that store readable,
+        # do not build the runner at all. `_credentials_are_unconfined` is the LOOP's own
+        # check, shared rather than copied so one tier decision cannot drift between the two
+        # runners, and its `acceptUnsandboxedAgentRisk` acknowledgement covers this path too
+        # (an operator who sets it has been told, at the posture disclosure, that the GitHub
+        # credential is then inside the watcher's sandbox). Imported at call time so the
+        # module attribute is the one patched, and so this module does not pull the loop
+        # supervisor's import graph at import time.
+        from .runner import _credentials_are_unconfined
+
+        unconfined = _credentials_are_unconfined()
+        if unconfined:
+            raise RuntimeError(_credential_refusal(unconfined))
 
         def _activity(event: dict[str, Any]) -> None:
             kind = str(event.get("kind") or "")
@@ -844,6 +875,12 @@ class PRWatcherRegistry:
                 default_timeout_s=DEFAULT_NUDGE_TIMEOUT_S,
                 stop_check=stop_ev.is_set,
                 on_activity=_activity,
+                # The ENV half of the credential boundary, and the half that is enforced on
+                # this path regardless of tier: `strip_credential_env` runs only in the
+                # subprocess spawn this method refuses, so a `GH_TOKEN`/`GITHUB_TOKEN` in the
+                # gateway's environment was inherited straight into the unattended session.
+                # The gate above covers the on-disk store; this covers the environment.
+                extra_env=_github_credential_env_scrub(),
             )
             # Same fail-closed contract as `runner._build_runner`: this path did not
             # register the tool-restricted agent AT ALL, so a watcher's unattended nudges
@@ -1015,6 +1052,19 @@ class PRWatcherRegistry:
                 # Not fixable by editing code (closed PR, provider refusal) — surface it.
                 self._set(st, status=STATUS_BLOCKED, note=reason or "blocked")
                 self._log(st, "verdict", f"BLOCKED — {reason}")
+                return
+
+            # RE-ASSERT both hard gates before handing this pass a turn. The runner is built
+            # ONCE per watcher and then drives up to `max_nudges` turns over hours, so a
+            # build-time-only check let a watcher started while opted in keep running after
+            # the operator revoked the acknowledgement or a fleet raised the sandbox floor.
+            # Checked before `_ensure_clone` so a revoked watcher also does no git work, and
+            # skipped for an injected runner on exactly the grounds `_make_runner` skips both
+            # gates for one: the seam is test-only and its runner reaches no provider.
+            refusal = "" if self._runner_factory is not None else _watcher_preconditions_refusal()
+            if refusal:
+                self._set(st, status=STATUS_ERROR, note=refusal)
+                self._log(st, "error", refusal)
                 return
 
             clone, isolated_ok = self._ensure_clone(st, shared, status)
@@ -1329,6 +1379,81 @@ def _watcher_egress_accepted() -> bool:
     """
     config = store.read_json(store.config_path(), {}) or {}
     return bool(config.get("watcherAcceptEgressRisk") is True)
+
+
+#: GitHub credential variables neutralized for a watcher's agent session.
+#:
+#: Set to EMPTY rather than deleted, because the provider factory's ``extra_env`` is MERGED
+#: over the gateway's environment at the ACP spawn (``env.update``), so "" is the only
+#: available spelling of "unset" — and it is a true unset for ``gh`` and ``git``, both of
+#: which treat an empty token variable as absent.
+#:
+#: Always all four, never only the ones present right now: ``config.loader`` seeds credentials
+#: from the data home's ``.env`` into ``os.environ`` lazily, so a variable absent when this
+#: runs can be present by the time the session spawns.
+#:
+#: Scoped to the GitHub family ON PURPOSE. The broad ``push_policy.CREDENTIAL_ENV_MARKERS``
+#: sweep the subprocess path uses would also empty ``AWS_SESSION_TOKEN``, which the standard
+#: tier deliberately leaves in place for kiro-cli's own authentication — breaking the provider
+#: is not a security improvement. The GitHub identity is the one this app's own prompt makes
+#: reachable from outsider-written text, and it is the one that must not be there.
+_GITHUB_CREDENTIAL_ENV_NAMES: tuple[str, ...] = (
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GH_ENTERPRISE_TOKEN",
+    "GITHUB_ENTERPRISE_TOKEN",
+)
+
+
+def _github_credential_env_scrub() -> dict[str, str]:
+    """``{name: ""}`` for every GitHub credential variable, for a session's ``extra_env``.
+
+    The gateway's own host-side ``gh`` reads (:mod:`.pr_checks`, :func:`_gh`) are separate
+    processes and keep their environment: this narrows the AGENT's session only.
+    """
+    return {name: "" for name in _GITHUB_CREDENTIAL_ENV_NAMES}
+
+
+def _credential_refusal(reason: str, *, verb: str = "runner refused") -> str:
+    """The watcher-facing message for a credential-gate refusal.
+
+    The REASON leads: ``_set``/``_log`` bound this text to 300 chars and the reason is what
+    names the way out, so a truncation eats the watcher-specific sentence rather than the
+    actionable half. One definition because both the build gate and the per-pass re-check
+    report it — ``verb`` keeps them honest about which happened, since the re-check STOPS a
+    watcher rather than declining to build one.
+    """
+    return (
+        f"watcher {verb}: {reason}. An unattended turn driven by untrusted "
+        "PR-comment text must not hold the operator's GitHub credential."
+    )
+
+
+def _watcher_preconditions_refusal() -> str:
+    """A reason string when a watcher turn must NOT run right now, else ``""``.
+
+    Both hard gates, re-read from disk and re-resolved against the live sandbox tier. Called
+    at runner-build time AND before every pass: a runner is built once per watcher while
+    ``_nudge_loop`` hands it up to ``max_nudges`` turns over hours, so a build-time-only check
+    would let a watcher started while opted in keep running after the operator revoked the
+    acknowledgement or a fleet raised the floor. The provider factory froze its sandbox mode
+    at build time, so the honest action on a mid-flight change is to STOP the watcher, which
+    is what the caller does.
+    """
+    from .runner import _credentials_are_unconfined
+
+    if not _watcher_egress_accepted():
+        # "not set OR unreadable": `store.read_json` swallows an OSError and hands back the
+        # default, so a torn config.json lands here too. Fail-closed is right for the
+        # DECISION; saying which it was is not something this read can distinguish, so the
+        # message names both rather than asserting a revocation that may not have happened.
+        return (
+            "watcher stopped: `watcherAcceptEgressRisk` is not set (or the app config could "
+            "not be read), and an unattended agent driven by untrusted PR-comment text can "
+            "reach the network"
+        )
+    unconfined = _credentials_are_unconfined()
+    return _credential_refusal(unconfined, verb="stopped") if unconfined else ""
 
 
 def publish_if_authorized(pr: str, status: dict[str, Any]) -> tuple[bool, str]:

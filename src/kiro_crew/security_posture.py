@@ -412,30 +412,56 @@ _REDACTION_SINKS: tuple[tuple[str, str, str], ...] = (
     ),
     (
         # The watcher's residual risk, disclosed because accepting it is the OPERATOR's
-        # decision and a silent limitation is the real defect. Measured: a nested process under
-        # `mode="strict"` sees ~/.aws, ~/.config/gh and ~/.docker EMPTY on a populated host,
-        # and ~/.ssh exposes only `known_hosts` (host-key verification needs it) while
-        # id_rsa/*.key stay hidden — so CREDENTIALS are confined. NETWORK EGRESS is NOT: the
-        # sandbox never enters a network namespace (no CLONE_NEWNET; its docstring explains
-        # agentic commands need reachable networking), and while curl/wget/nc are denied,
-        # `python helper.py` is allowed and can open a socket. The shell denylist cannot close
-        # that — it gates the requested command, not what the command then does. Consequence:
-        # point the PR watcher only at repositories whose PR comments you would be willing to
-        # execute. Raised by the GPT review (twice); the credential half was already verified
-        # under D-84, the egress half is new and correct.
+        # decision and a silent limitation is the real defect.
+        #
+        # CORRECTED (D-143). The earlier text here asserted strict-sandbox credential hiding,
+        # marked verified. The measurement behind that was real but described the
+        # WRONG PATH: `mode="strict"` is the `claude -p` subprocess spawn, which
+        # `_make_runner` refuses. Production watchers run `SessionAgentRunner` ->
+        # `create_provider_factory` -> `wrap_argv(mode=agent.sandbox)`, and the shipped
+        # `auto`/`standard` tier does not hide `~/.config/gh` — so the operator's GitHub OAuth
+        # credential was inside the watcher's sandbox by construction, and the consent this
+        # disclosure asks for was given on a false premise. The gate now refuses at build time
+        # AND before every pass while the effective tier leaves that store readable, and the
+        # GitHub token variables are scrubbed from the session environment on every path.
+        #
+        # The text below states the OPT-IN as a waiver rather than only as a second
+        # precondition, because that is what it is on a default install: `.config/gh` is
+        # hidden by the `strict` tier alone (it occurs exactly once in `sandbox.py`, in
+        # `_STRICT_DIRS` — `cc` hides `.aws`/`.kube` but NOT the GitHub store), and
+        # `agent.sandbox`'s enum offers only `auto`/`off` with out-of-enum values reset by
+        # config validation. So the honest disclosure is: the refusal holds by default, and
+        # setting `acceptUnsandboxedAgentRisk` is how an operator gives it up.
+        #
+        # NETWORK EGRESS remains unconfined and that half was always correct: the sandbox never
+        # enters a network namespace (no CLONE_NEWNET; its docstring explains agentic commands
+        # need reachable networking), and while curl/wget/nc are denied, `python helper.py` is
+        # allowed and can open a socket. The shell gate cannot close that — it gates the
+        # requested command, not what the command then does. Consequence: point the PR watcher
+        # only at repositories whose PR comments you would be willing to execute.
         "Auto-Improvement PR-watcher egress boundary",
         "apps/builtins/auto_improvement/backend/pr_watchers.py",
         "The watcher reads UNTRUSTED text (pull-request comments, check logs) and runs with an "
         "auto-approved shell, because its job is to run the repository's own build/test/lint, "
-        "rebase, and commit. Credential stores are hidden by the strict sandbox (verified), but "
-        "network EGRESS is deliberately reachable and a nested interpreter can open a socket "
-        "even though curl/wget/nc are denied. Two OPT-IN gates, both default OFF, both a "
-        "one-time consent: `watcherAcceptEgressRisk` is a HARD precondition — `_make_runner` "
-        "refuses to build any watcher runner without it, so a watcher cannot run at all until "
-        "the operator acknowledges this egress boundary — and `watcherAutoStart` separately "
-        "gates whether a polled GET may PROMOTE watchers (a promote used to happen with no "
-        "operator action, leaving no consent moment). Treat setting either flag as agreeing to "
-        "execute the pull request's comments.",
+        "rebase, and commit. Network EGRESS is deliberately reachable and a nested interpreter "
+        "can open a socket even though curl/wget/nc are denied. The operator's GitHub "
+        "CREDENTIAL is kept out of the turn by a REFUSAL, not by the shell gate: no watcher "
+        "runner is built, and no pass is handed a turn, while the effective sandbox tier "
+        "leaves ~/.config/gh readable — only the 'strict' tier hides it, and 'strict' is "
+        "reachable only as a governed sandbox.min_level floor because agent.sandbox's own enum "
+        "is auto/off. The session's GH_TOKEN/GITHUB_TOKEN variables are emptied on every path "
+        "regardless of tier. Three OPT-IN gates, all default OFF, all a one-time consent: "
+        "`watcherAcceptEgressRisk` is a HARD precondition covering EGRESS only, so a watcher "
+        "cannot run at all until the operator acknowledges that boundary; "
+        "`acceptUnsandboxedAgentRisk` is the second HARD precondition, and because no shipped "
+        "agent.sandbox value hides ~/.config/gh, on a default install it is the only way to "
+        "run a watcher — setting it WAIVES the credential refusal above and means accepting "
+        "that an unattended turn driven by outsider-written pull-request text can read and use "
+        "your GitHub login, which the token scrub cannot prevent (gh falls back to the stored "
+        "OAuth credential); and `watcherAutoStart` separately gates whether a polled GET may "
+        "PROMOTE watchers (a promote otherwise happens with no operator action and no consent "
+        "moment). Treat setting any of them as agreeing to execute the pull request's "
+        "comments.",
     ),
     (
         "Auto-Improvement run activity feed",

