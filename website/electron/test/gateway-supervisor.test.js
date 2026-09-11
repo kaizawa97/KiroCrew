@@ -730,7 +730,7 @@ test("the local mint is refused when the listener is an ssh forward, not our gat
   assert.ok(logs.some((line) => line.includes("local mint skipped") && line.includes("listener-foreign")));
 });
 
-test("an unavailable listener probe fails the mint closed when no gateway child is ours", async () => {
+test("an unavailable listener probe fails the mint closed", async () => {
   const { supervisor, reads, requests, logs } = mintHarness({ listener: null });
 
   assert.strictEqual(await supervisor.fetchLocalToken("http://localhost:5476"), "");
@@ -739,40 +739,74 @@ test("an unavailable listener probe fails the mint closed when no gateway child 
   assert.ok(logs.some((line) => line.includes("local mint skipped") && line.includes("listener-unknown")));
 });
 
-test("an unavailable listener probe accepts this shell's own live gateway child", async () => {
-  const built = mintHarness({ listener: null });
-  const { supervisor, spawnCalls, requests, logs } = built;
+// The fallback this test exists to forbid: "we spawned a child for this port and
+// it is still alive" is NOT evidence that the child holds the port. The backend
+// retries EADDRINUSE for ~15s (_start_site in dashboard/server.py), so a manual
+// `ssh -L` can hold the port for the whole of our child's bind-retry window — on
+// a machine with no listener probe, accepting the child would mint against the
+// tunnel and hand this machine's owner credential to the remote host.
+test("a live gateway child is NOT accepted as the listener when the probe cannot run", async () => {
+  const { supervisor, spawnCalls, reads, requests } = mintHarness({ listener: null });
 
   assert.strictEqual(await supervisor.start(), true);
   assert.strictEqual(spawnCalls.length, 1);
+  assert.strictEqual(spawnCalls[0].child.exitCode, null, "the child is alive");
 
-  assert.strictEqual(
-    await supervisor.fetchLocalToken("http://localhost:5476"),
-    "minted-token",
-  );
-  assert.deepStrictEqual(mintRequests(requests), [
-    { url: "http://127.0.0.1:5476/api/token/local", secret: LOCAL_SECRET },
-  ]);
-  assert.ok(logs.some((line) => line.includes("accepting this shell's own live gateway child")));
-
-  // The child is the whole justification: once it is gone, so is the mint.
-  spawnCalls[0].child.exitCode = 1;
-  spawnCalls[0].child.emit("exit", 1, null);
   assert.strictEqual(await supervisor.fetchLocalToken("http://localhost:5476"), "");
-  assert.strictEqual(mintRequests(requests).length, 1);
+  assert.deepStrictEqual(reads, [], "the secret must not even be read from disk");
+  assert.deepStrictEqual(mintRequests(requests), []);
 });
 
-test("a live gateway child never clears a DIFFERENT port a connection window targets", async () => {
-  const built = mintHarness({ listener: null });
-  const { supervisor, spawnCalls, requests } = built;
+// Same rule with the holder made explicit: our child is alive AND something else
+// answers on the port.
+test("a live gateway child never clears a port a foreign process is holding", async () => {
+  const { supervisor, spawnCalls, requests } = mintHarness({
+    listener: "ssh -NL 5476:localhost:5476 remote.example.com",
+  });
 
   await supervisor.start();
   assert.strictEqual(spawnCalls.length, 1);
 
-  // The child binds :5476; :7778 is someone else's gateway (a tunnel, in the
-  // documented remote setup) and this shell knows nothing about its listener.
-  assert.strictEqual(await supervisor.fetchLocalToken("http://localhost:7778"), "");
+  assert.strictEqual(await supervisor.fetchLocalToken("http://localhost:5476"), "");
   assert.deepStrictEqual(mintRequests(requests), []);
+});
+
+test("every mint attempt re-establishes the listener rather than trusting a cache", async () => {
+  // A cached refusal would outlive the gateway restart that fixed it (the
+  // spurious-token-prompt class token-acquire.js exists to avoid), and a cached
+  // permission would be a stale authorization for a disclosure. The cost is a
+  // probe per attempt, in a state that is already waiting on the user.
+  const { supervisor, probe, requests } = mintHarness({
+    listener: "ssh -NL 5476:localhost:5476 remote.example.com",
+  });
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    assert.strictEqual(await supervisor.fetchLocalToken("http://localhost:5476"), "");
+  }
+
+  assert.strictEqual(
+    probe.calls.filter((call) => String(call.file).endsWith("lsof")).length,
+    3,
+  );
+  assert.deepStrictEqual(mintRequests(requests), []);
+});
+
+test("a permitting listener verdict is re-established before every disclosure", async () => {
+  const { supervisor, probe, requests } = mintHarness();
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    assert.strictEqual(
+      await supervisor.fetchLocalToken("http://localhost:5476"),
+      "minted-token",
+    );
+  }
+
+  assert.strictEqual(
+    probe.calls.filter((call) => String(call.file).endsWith("lsof")).length,
+    3,
+    "the listener is re-established before every disclosure",
+  );
+  assert.strictEqual(mintRequests(requests).length, 3);
 });
 
 test("a steady-state mint refusal is logged once, not once per attempt", async () => {

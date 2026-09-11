@@ -204,14 +204,20 @@ everything.
    "Token Required" page names)
 ```
 
-Step 2 fails **closed**: a foreign listener (a manual `ssh -L` forward, an
-unrelated process), an unbound port, and a listener probe that cannot run all
-skip the local mint rather than guess, and log why to `gateway-launch.log`. The
-one exception is a gateway child this shell spawned itself for that port and
-which is still alive — first-hand evidence that needs no probe. This ordering is
-enforced in one place, `local-token.js` (`decideLocalMint`), so every caller —
-boot connect, 403 retry, renderer recovery, **Refresh Token**, the companion
-surfaces — inherits it.
+Step 2 fails **closed**, with no exceptions: a foreign listener (a manual
+`ssh -L` forward, an unrelated process), an unbound port, and a listener probe
+that cannot run at all (no `lsof` / no `netstat`) each skip the local mint rather
+than guess, and log why to `gateway-launch.log`. There is deliberately no "we
+spawned a gateway for this port" shortcut — a live child is not a *bound* child
+(the backend retries `EADDRINUSE` for ~15s), so on a machine with no listener
+probe that shortcut would mint against whatever else is holding the port. The
+consequence is worth stating plainly: **on a host with no listener probe the
+local mint never runs**, and the app asks for a pasted `kirocrew token` instead.
+Installing `lsof` restores it.
+
+This ordering is enforced in one place, `local-token.js` (`decideLocalMint`), so
+every caller — boot connect, 403 retry, renderer recovery, **Refresh Token**, the
+companion surfaces — inherits it.
 
 ### Menus
 

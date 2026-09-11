@@ -166,9 +166,4 @@ async function fetchLocalToken({
   return requestLocalToken(http, verdict.url, secret);
 }
 
-module.exports = {
-  fetchLocalToken,
-  literalLoopbackUrl,
-  decideLocalMint,
-  OWN_GATEWAY_OWNERS,
-};
+module.exports = { fetchLocalToken, literalLoopbackUrl, decideLocalMint };

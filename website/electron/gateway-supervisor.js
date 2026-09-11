@@ -984,43 +984,18 @@ function createGatewaySupervisor({
   // host, a foreign listener, an unavailable probe) would repeat one identical
   // line into gateway-launch.log every few seconds. Keep the first occurrence —
   // it is the only place a skipped mint can be told apart from a rejected secret
-  // — and cap the repeats. Keyed by the whole line, so the map is bounded by the
-  // ports this shell talks to times the handful of outcomes.
+  // — and cap the repeats. The key is the whole line, so the map holds one entry
+  // per port per outcome; the size cap is there because only a bound that the
+  // code enforces is a bound.
   const MINT_LOG_INTERVAL_MS = 60_000;
+  const MINT_LOG_MAX_KEYS = 64;
   const mintLoggedAt = new Map();
   function logMintDecision(line) {
     const now = Date.now();
     if (now - (mintLoggedAt.get(line) || 0) < MINT_LOG_INTERVAL_MS) return;
+    if (mintLoggedAt.size >= MINT_LOG_MAX_KEYS) mintLoggedAt.clear();
     mintLoggedAt.set(line, now);
     glog(line);
-  }
-
-  /**
-   * Who holds the LISTEN socket on `mintPort`, for the ONE decision that would
-   * disclose this machine's `.local_secret` (see decideLocalMint).
-   *
-   * The port-owner probe is authoritative whenever it can run. When it cannot
-   * (no lsof, no netstat — it answers "unknown"), a gateway child THIS shell
-   * spawned for this very port and which is still alive is first-hand evidence
-   * that the listener is ours: the boot decision table adopts rather than spawns
-   * when another holder answers, and a child that loses the bind exits at once,
-   * which clears the slot. Without that fallback the mint would fail closed on
-   * every launch of a machine with no listener probe. A probe that positively
-   * names a DIFFERENT owner ("foreign", "none") is never overridden.
-   */
-  async function classifyMintPortOwner(mintPort) {
-    const owner = await probeGatewayPortOwner(mintPort);
-    if (owner !== "unknown") return owner;
-    if (
-      String(mintPort) === String(PORT)
-      && gatewayOwnership === "spawned"
-      && gatewayProcess
-      && gatewayProcess.exitCode === null
-    ) {
-      logMintDecision(`token mint: listener probe unavailable on :${mintPort} — accepting this shell's own live gateway child (pid=${gatewayProcess.pid || "?"}) as the listener`);
-      return "kirocrew";
-    }
-    return owner;
   }
 
   async function fetchLocalToken(targetBackendUrl = BACKEND_URL) {
@@ -1039,7 +1014,24 @@ function createGatewaySupervisor({
       fs,
       http,
       getRemoteHost: (mintPort) => getRemoteHostConfig(store, mintPort)?.host || "",
-      getPortOwner: (mintPort) => classifyMintPortOwner(mintPort),
+      // Who holds the port's LISTEN socket is the whole second half of the
+      // answer: only "kirocrew"/"service" permit the mint, and "unknown" (no
+      // lsof, no netstat) refuses like any other non-answer. There is
+      // deliberately NO "but we spawned a child for this port" shortcut — a live
+      // child is not a BOUND child, since the backend retries EADDRINUSE for
+      // ~15s (`_start_site` in dashboard/server.py), so on a machine with no
+      // probe a manual `ssh -L` holding the port during our child's bind-retry
+      // would be minted against: the exact disclosure this gate prevents. Nor is
+      // the verdict cached — a stale refusal would outlive the restart that
+      // fixed it and re-create the spurious token prompt token-acquire.js exists
+      // to avoid, and a stale PERMISSION would be an authorization for a
+      // disclosure. The cost is a re-probe per attempt in a state that is
+      // already waiting on the user (the token prompt).
+      //
+      // The port is the window's OWN, normalized to digits by defaultedPort in
+      // this process — never a renderer-supplied value, which is why the IPC
+      // surface still exposes only probePrimaryPortOwner.
+      getPortOwner: (mintPort) => probeGatewayPortOwner(mintPort),
       log: logMintDecision,
     });
   }
