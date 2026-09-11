@@ -979,15 +979,68 @@ function createGatewaySupervisor({
     });
   }
 
+  // The mint is re-attempted on every 403, every Refresh Token and every
+  // companion tick, so a STEADY-STATE decision (a tab configured for a remote
+  // host, a foreign listener, an unavailable probe) would repeat one identical
+  // line into gateway-launch.log every few seconds. Keep the first occurrence —
+  // it is the only place a skipped mint can be told apart from a rejected secret
+  // — and cap the repeats. Keyed by the whole line, so the map is bounded by the
+  // ports this shell talks to times the handful of outcomes.
+  const MINT_LOG_INTERVAL_MS = 60_000;
+  const mintLoggedAt = new Map();
+  function logMintDecision(line) {
+    const now = Date.now();
+    if (now - (mintLoggedAt.get(line) || 0) < MINT_LOG_INTERVAL_MS) return;
+    mintLoggedAt.set(line, now);
+    glog(line);
+  }
+
+  /**
+   * Who holds the LISTEN socket on `mintPort`, for the ONE decision that would
+   * disclose this machine's `.local_secret` (see decideLocalMint).
+   *
+   * The port-owner probe is authoritative whenever it can run. When it cannot
+   * (no lsof, no netstat — it answers "unknown"), a gateway child THIS shell
+   * spawned for this very port and which is still alive is first-hand evidence
+   * that the listener is ours: the boot decision table adopts rather than spawns
+   * when another holder answers, and a child that loses the bind exits at once,
+   * which clears the slot. Without that fallback the mint would fail closed on
+   * every launch of a machine with no listener probe. A probe that positively
+   * names a DIFFERENT owner ("foreign", "none") is never overridden.
+   */
+  async function classifyMintPortOwner(mintPort) {
+    const owner = await probeGatewayPortOwner(mintPort);
+    if (owner !== "unknown") return owner;
+    if (
+      String(mintPort) === String(PORT)
+      && gatewayOwnership === "spawned"
+      && gatewayProcess
+      && gatewayProcess.exitCode === null
+    ) {
+      logMintDecision(`token mint: listener probe unavailable on :${mintPort} — accepting this shell's own live gateway child (pid=${gatewayProcess.pid || "?"}) as the listener`);
+      return "kirocrew";
+    }
+    return owner;
+  }
+
   async function fetchLocalToken(targetBackendUrl = BACKEND_URL) {
     // Re-resolve the home at call time so a KIROCREW_HOME change after Electron
-    // starts is honored. Mint only against the literal loopback endpoint.
+    // starts is honored. The secret is read ONLY after decideLocalMint confirms
+    // the target is this machine's own gateway: a tunnelled remote presents as
+    // loopback, so the literal-loopback check alone would send this machine's
+    // owner credential down an `ssh -L` forward to another host. Deciding here,
+    // at the one function that reads the secret, is what makes every call site
+    // (boot connect, 403 retry, renderer recovery, Refresh Token, companions)
+    // configuration-first without each of them having to remember to be.
     return fetchTokenFromHome({
       backendUrl: targetBackendUrl,
       resolveHome,
       path,
       fs,
       http,
+      getRemoteHost: (mintPort) => getRemoteHostConfig(store, mintPort)?.host || "",
+      getPortOwner: (mintPort) => classifyMintPortOwner(mintPort),
+      log: logMintDecision,
     });
   }
 
@@ -1507,7 +1560,9 @@ function createGatewaySupervisor({
 
       // A newly started gateway regenerates .local_secret. /api/status can answer
       // just before local mint accepts that secret, so retry only an own-gateway
-      // 403; foreign/SSH gateways can never be minted from this machine.
+      // 403; foreign/SSH gateways can never be minted from this machine, and
+      // fetchLocalToken refuses to even read the secret for them (decideLocalMint)
+      // — so this order tries the cheaper credential, never a doomed disclosure.
       for (let attempt = 0; ; attempt += 1) {
         let token = await fetchLocalToken(targetBackendUrl);
         if (!token) {

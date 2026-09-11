@@ -185,13 +185,33 @@ each launch to get a fresh JWT — no manual paste required.
 
 ### Token flow (per tab)
 
+The credential source is decided from **evidence about the tab's port**, not by
+trying the local secret and seeing what happens. `~/.kiro/crew/.local_secret` is
+the LOCAL gateway's owner credential (`/api/token/local` exchanges it for an
+owner token, and internal routes accept the same value), and a tunnelled remote
+gateway is addressed as `http://localhost:<port>` — so "loopback" alone would
+send this machine's owner credential down the `ssh -L` forward to the other
+host, where it buys nothing (that gateway signs with its own secret) and costs
+everything.
+
 ```
-1. Try local ~/.kiro/crew/.local_secret → /api/token/local on the tab's port
-   (with a temporary ~/.kirocrew read fallback during one-time migration)
-2. If remote host configured for this port:
-   SSH: export PATH=<remotePath> KIROCREW_PORT=<port>; <bin> token
-3. Fallback: show manual token prompt
+1. If a remote host is configured for this port:
+   SSH only: export PATH=<remotePath> KIROCREW_PORT=<port>; <bin> token
+2. Otherwise, if the tab's port is positively this machine's own gateway
+   (its LISTEN socket is held by this shell's gateway or its service manager):
+   local ~/.kiro/crew/.local_secret → /api/token/local on the tab's port
+3. Fallback: show manual token prompt (`kirocrew token`, on the machine the
+   "Token Required" page names)
 ```
+
+Step 2 fails **closed**: a foreign listener (a manual `ssh -L` forward, an
+unrelated process), an unbound port, and a listener probe that cannot run all
+skip the local mint rather than guess, and log why to `gateway-launch.log`. The
+one exception is a gateway child this shell spawned itself for that port and
+which is still alive — first-hand evidence that needs no probe. This ordering is
+enforced in one place, `local-token.js` (`decideLocalMint`), so every caller —
+boot connect, 403 retry, renderer recovery, **Refresh Token**, the companion
+surfaces — inherits it.
 
 ### Menus
 

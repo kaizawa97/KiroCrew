@@ -610,3 +610,183 @@ test("Linux and Windows keep their own stale-asset recovery", async () => {
     assert.deepStrictEqual(state.exits, [], platform);
   }
 });
+
+// ── the local token mint: who may receive .local_secret ─────────────────────
+//
+// `.local_secret` is the LOCAL gateway's owner credential. A gateway on another
+// host reached through `ssh -L 5476:localhost:5476 host` is addressed as
+// http://localhost:5476, so loopback alone cannot tell it apart from this
+// machine's own gateway — these tests pin the evidence the supervisor must have
+// before the secret leaves (or is even read from) this machine.
+
+const LOCAL_SECRET = "owner-mint-secret";
+
+// An http fake that answers only the local mint. Every other request (the health
+// probe) is refused, which is what drives start() into spawning a gateway.
+function mintHttp() {
+  const requests = [];
+  return {
+    requests,
+    get(url, options, callback) {
+      const headers = (options && options.headers) || {};
+      requests.push({ url, secret: headers["X-Local-Secret"] });
+      const request = new EventEmitter();
+      request.destroy = () => {};
+      if (!String(url).includes("/api/token/local")) {
+        queueMicrotask(() => request.emit("error", new Error("connection refused")));
+        return request;
+      }
+      queueMicrotask(() => {
+        const response = new EventEmitter();
+        response.statusCode = 200;
+        response.resume = () => {};
+        callback(response);
+        response.emit("data", JSON.stringify({ token: "minted-token" }));
+        response.emit("end");
+      });
+      return request;
+    },
+  };
+}
+
+// A POSIX listener probe: `listener` is the `ps -o command=` line of whoever
+// holds the port, or null for "the probe itself cannot run" (no lsof).
+function listenerProbe(listener) {
+  const calls = [];
+  return {
+    calls,
+    execFileFn(file, args, _options, callback) {
+      calls.push({ file, args });
+      if (String(file).endsWith("lsof")) {
+        if (listener === null) {
+          callback(Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" }), "", "");
+          return;
+        }
+        callback(null, "4242\n", "");
+        return;
+      }
+      if (args.includes("command=")) { callback(null, `${listener}\n`, ""); return; }
+      if (args.includes("ppid=")) { callback(null, "999\n", ""); return; }
+      throw new Error(`unexpected execFile: ${file} ${args.join(" ")}`);
+    },
+  };
+}
+
+function mintHarness({ storeData = {}, listener = "/usr/local/bin/kirocrew gateway --no-open" } = {}) {
+  const reads = [];
+  const baseFs = harness().fsMod;
+  const probe = listenerProbe(listener);
+  const httpMod = mintHttp();
+  const built = harness({
+    store: fakeStore(storeData),
+    httpMod,
+    execFileFn: probe.execFileFn,
+    fsMod: {
+      ...baseFs,
+      readFileSync(readPath) {
+        reads.push(readPath);
+        return LOCAL_SECRET;
+      },
+    },
+  });
+  return { ...built, reads, probe, requests: httpMod.requests };
+}
+
+const mintRequests = (requests) =>
+  requests.filter((entry) => String(entry.url).includes("/api/token/local"));
+
+test("the local mint never reads or sends the secret to a configured remote port", async () => {
+  const { supervisor, reads, probe, requests, logs } = mintHarness({
+    storeData: { remoteHosts: { 5476: { host: "remote.example.com" } } },
+  });
+
+  assert.strictEqual(await supervisor.fetchLocalToken("http://localhost:5476"), "");
+  assert.deepStrictEqual(reads, [], "the secret must not even be read from disk");
+  assert.deepStrictEqual(mintRequests(requests), []);
+  assert.deepStrictEqual(probe.calls, [], "configuration decides before any probe");
+  assert.ok(logs.some((line) => line.includes("local mint skipped") && line.includes("remote-configured")));
+});
+
+test("the local mint proceeds for a port this shell's own gateway is listening on", async () => {
+  const { supervisor, requests } = mintHarness();
+
+  assert.strictEqual(
+    await supervisor.fetchLocalToken("http://localhost:5476"),
+    "minted-token",
+  );
+  assert.deepStrictEqual(mintRequests(requests), [
+    { url: "http://127.0.0.1:5476/api/token/local", secret: LOCAL_SECRET },
+  ]);
+});
+
+test("the local mint is refused when the listener is an ssh forward, not our gateway", async () => {
+  const { supervisor, reads, requests, logs } = mintHarness({
+    listener: "ssh -NL 5476:localhost:5476 remote.example.com",
+  });
+
+  assert.strictEqual(await supervisor.fetchLocalToken("http://localhost:5476"), "");
+  assert.deepStrictEqual(reads, []);
+  assert.deepStrictEqual(mintRequests(requests), []);
+  assert.ok(logs.some((line) => line.includes("local mint skipped") && line.includes("listener-foreign")));
+});
+
+test("an unavailable listener probe fails the mint closed when no gateway child is ours", async () => {
+  const { supervisor, reads, requests, logs } = mintHarness({ listener: null });
+
+  assert.strictEqual(await supervisor.fetchLocalToken("http://localhost:5476"), "");
+  assert.deepStrictEqual(reads, []);
+  assert.deepStrictEqual(mintRequests(requests), []);
+  assert.ok(logs.some((line) => line.includes("local mint skipped") && line.includes("listener-unknown")));
+});
+
+test("an unavailable listener probe accepts this shell's own live gateway child", async () => {
+  const built = mintHarness({ listener: null });
+  const { supervisor, spawnCalls, requests, logs } = built;
+
+  assert.strictEqual(await supervisor.start(), true);
+  assert.strictEqual(spawnCalls.length, 1);
+
+  assert.strictEqual(
+    await supervisor.fetchLocalToken("http://localhost:5476"),
+    "minted-token",
+  );
+  assert.deepStrictEqual(mintRequests(requests), [
+    { url: "http://127.0.0.1:5476/api/token/local", secret: LOCAL_SECRET },
+  ]);
+  assert.ok(logs.some((line) => line.includes("accepting this shell's own live gateway child")));
+
+  // The child is the whole justification: once it is gone, so is the mint.
+  spawnCalls[0].child.exitCode = 1;
+  spawnCalls[0].child.emit("exit", 1, null);
+  assert.strictEqual(await supervisor.fetchLocalToken("http://localhost:5476"), "");
+  assert.strictEqual(mintRequests(requests).length, 1);
+});
+
+test("a live gateway child never clears a DIFFERENT port a connection window targets", async () => {
+  const built = mintHarness({ listener: null });
+  const { supervisor, spawnCalls, requests } = built;
+
+  await supervisor.start();
+  assert.strictEqual(spawnCalls.length, 1);
+
+  // The child binds :5476; :7778 is someone else's gateway (a tunnel, in the
+  // documented remote setup) and this shell knows nothing about its listener.
+  assert.strictEqual(await supervisor.fetchLocalToken("http://localhost:7778"), "");
+  assert.deepStrictEqual(mintRequests(requests), []);
+});
+
+test("a steady-state mint refusal is logged once, not once per attempt", async () => {
+  const { supervisor, logs } = mintHarness({
+    storeData: { remoteHosts: { 5476: { host: "remote.example.com" } } },
+  });
+
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    assert.strictEqual(await supervisor.fetchLocalToken("http://localhost:5476"), "");
+  }
+
+  assert.strictEqual(
+    logs.filter((line) => line.includes("local mint skipped")).length,
+    1,
+    "the reason is on record without one line per 403/refresh/companion tick",
+  );
+});
