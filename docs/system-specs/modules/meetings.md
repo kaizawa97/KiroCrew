@@ -439,7 +439,10 @@ worth carrying forward:
   body is validated by hand rather than with `field_str`. That helper treats a
   non-string as *missing* — so a malformed request would answer 200 having ERASED
   the memo — and it `strip()`s, destroying trailing blank lines the user typed. A
-  note is the one thing here the user cannot regenerate.
+  note is the one thing here the user cannot regenerate. A body that cannot be encoded
+  as UTF-8 (JSON `\udXXX` escapes decode into unpaired surrogates) is refused as a 400
+  for the same reason the minutes `PUT` refuses one: the write would otherwise fail
+  inside `atomic_write` and report a server fault for a malformed request.
 * **The note is never polled**, and the save response seeds the cache instead of
   invalidating: the textarea is the authoritative copy, and refetching under the user
   is how an autosaving editor loses a sentence.
@@ -447,6 +450,11 @@ worth carrying forward:
   bytes (`domain/images.sniff_image_ext`) and the name is a fresh uuid4, so no client
   string reaches a path. An unrecognised signature is REFUSED, which is what keeps
   SVG out (no binary signature, and a document that can carry `<script>`).
+  The magic bytes themselves are NOT this app's: `sniff_image_ext` delegates to
+  `kiro_crew.messaging.raster.sniff_raster_mime` and keeps only a `{mime: ext}`
+  allowlist, which is the per-consumer narrowing that module reserves for its callers.
+  A second copy of the table is how one path ends up accepting a type another rejects,
+  so BMP stays out by being absent from the allowlist rather than from the table.
   `store.safe_note_image_name` additionally requires exactly the generated shape,
   because `contain()` alone is not enough: it bounds a path to the DATA ROOT, so
   `../m2/note-taker.md` — another meeting's agent output — would pass.

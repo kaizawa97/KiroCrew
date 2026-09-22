@@ -429,6 +429,8 @@ export default function MeetingView({
           updatedAt={note.updatedAt}
           path={note.path}
           saving={note.saving}
+          saveFailed={note.saveFailed}
+          loadError={note.loadError}
           onUploadImage={session.uploadNoteImage}
           onSave={session.saveNote}
           onClose={() => session.setNoteOpen(false)}

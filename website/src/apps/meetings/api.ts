@@ -90,7 +90,6 @@ export interface NoteImage {
   /** Relative, e.g. `images/ab12….png` — resolved against the note's location. */
   src: string
   alt: string
-  content_type: string
 }
 
 /** One translated transcript line. `text` is `''` when the translation failed. */

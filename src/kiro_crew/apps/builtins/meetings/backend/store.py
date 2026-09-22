@@ -720,7 +720,13 @@ def read_note(meeting_id: str, root: Path | None = None) -> dict[str, Any]:
     """The note's text and mtime, or empty strings when there is none. BLOCKING.
 
     A missing file is the normal first state, not an error — every meeting starts
-    without a note.
+    without a note. A file that EXISTS and cannot be read is the opposite, and the
+    ``OSError`` is deliberately allowed to propagate: the panel renders an empty note
+    as an empty textarea, and its autosave replaces the file on the first keystroke,
+    so answering "there is no note" for an unreadable one is how the note gets
+    destroyed. ``handle_get_note`` turns this into a 500 the panel shows in place.
+    Decoding cannot fail here — ``errors="replace"`` is what makes a corrupt note
+    readable rather than an error.
     """
     path = note_path(meeting_id, root)
     # The absolute path is returned so the dashboard's markdown renderer can resolve
@@ -728,10 +734,9 @@ def read_note(meeting_id: str, root: Path | None = None) -> dict[str, Any]:
     # lets pasted images render through the existing hardened file route instead of a
     # second serving path in this app.
     payload = {"content": "", "updated_at": "", "path": str(path)}
-    try:
-        payload["content"] = path.read_text(encoding="utf-8", errors="replace")
-    except (OSError, ValueError):
+    if not path.is_file():
         return payload
+    payload["content"] = path.read_text(encoding="utf-8", errors="replace")
     try:
         payload["updated_at"] = time.strftime(
             "%Y-%m-%dT%H:%M:%SZ", time.gmtime(path.stat().st_mtime)

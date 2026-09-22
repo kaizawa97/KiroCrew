@@ -17,6 +17,7 @@ import { Eye, ImagePlus, NotebookPen, Pencil, X } from 'lucide-react'
 
 import { i18nT } from '../../../i18n/t'
 import { Btn } from '../../../components/ui'
+import ErrorNotice from '../../../components/ErrorNotice'
 import MarkdownRenderer, { BasePathCtx } from '../../../components/MarkdownRenderer'
 
 /** Quiet period after the last keystroke before a save fires. */
@@ -52,6 +53,20 @@ interface Props {
   /** Absolute path of the note file, so relative image links resolve when rendered. */
   path: string
   saving: boolean
+  /**
+   * Whether the last save FAILED. Load-bearing for honesty, not decoration:
+   * `flush` advances `savedRef` before the response lands (it has to, or the
+   * in-flight response would revert every keystroke), so without this the
+   * footer reads "Saved" after a PUT that never stored anything.
+   */
+  saveFailed: boolean
+  /**
+   * Server sentence from a failed initial GET, or `''`. Separate from
+   * `saveFailed` because the two are different losses: a refused save means the
+   * text on screen is not on disk, a refused load means the text on screen is not
+   * what IS on disk.
+   */
+  loadError: string
   /** Uploads one pasted image and resolves with the markdown to insert. */
   onUploadImage: (file: File) => Promise<{ alt: string; src: string } | null>
   onSave: (content: string) => void
@@ -63,6 +78,8 @@ export default function NoteSidebar({
   updatedAt,
   path,
   saving,
+  saveFailed,
+  loadError,
   onUploadImage,
   onSave,
   onClose,
@@ -80,6 +97,16 @@ export default function NoteSidebar({
   draftRef.current = draft
   const onSaveRef = useRef(onSave)
   onSaveRef.current = onSave
+  // Read through a ref for the same reason `draft` and `onSave` are: `flush` keeps an
+  // empty dep list because the unmount effect must hold one stable identity.
+  const saveFailedRef = useRef(saveFailed)
+  saveFailedRef.current = saveFailed
+  // A FAILED load leaves the field empty, which is indistinguishable from "no note
+  // yet" — so every save path has to stay shut while it is set, or the debounce (or
+  // the unmount flush, which closing the panel takes) replaces a note that exists on
+  // disk with what the user typed into what looked like a blank one.
+  const loadErrorRef = useRef(loadError)
+  loadErrorRef.current = loadError
 
   // Adopt a server value that differs from what we last sent — another tab, or the
   // first load landing after the panel opened. Guarded on `savedRef` rather than on
@@ -95,7 +122,15 @@ export default function NoteSidebar({
       clearTimeout(timerRef.current)
       timerRef.current = null
     }
-    if (draftRef.current === savedRef.current) return
+    // Before the dirty check, not after: a note that failed to load must not be
+    // written back on ANY trigger, however the text compares.
+    if (loadErrorRef.current) return
+    // `savedRef` is advanced when a save is SENT, not when it lands, so after a
+    // refusal it equals the draft and an equality check alone would never resend --
+    // the footer would read "Unsaved changes" forever while nothing retried, and
+    // closing the panel would still drop the note. A failed save is therefore dirty
+    // however the text compares, and blur / preview / unmount each retry once.
+    if (draftRef.current === savedRef.current && !saveFailedRef.current) return
     savedRef.current = draftRef.current
     onSaveRef.current(draftRef.current)
   }, [])
@@ -147,11 +182,26 @@ export default function NoteSidebar({
     [onUploadImage, schedule],
   )
 
-  const dirty = draft !== savedRef.current
+  // A failed save counts as dirty however the text compares: the note is not on
+  // disk, so "Saved" would be a lie the user acts on by closing the panel.
+  const dirty = draft !== savedRef.current || saveFailed
+
+  // Either failure gets a notice that STAYS, the way SettingsView's save failure
+  // does: the toast is transient feedback, and "your note is not on disk" is a
+  // state the panel has to keep showing for as long as it is true. The save
+  // refusal wins when both are set — it is the one the user's next action (close
+  // the panel) can turn into lost text.
+  const failure = saveFailed
+    ? i18nT('apps.meetings.session.noteSaveFailed')
+    : loadError
 
   return (
+    // Stacked below `lg` with a bounded height, side-by-side at 340px from `lg`
+    // up — the same responsive shape TaskSidebar and TranslationSidebar use,
+    // because a fixed 340px column beside the meeting clips the panel inside a
+    // 320px viewport.
     <aside
-      className="flex-none w-[340px] border-l border-border bg-bg flex flex-col overflow-hidden"
+      className="flex-none w-full h-[42%] min-h-[260px] border-t border-border lg:h-full lg:w-[340px] lg:border-t-0 lg:border-l bg-bg flex flex-col overflow-hidden"
       aria-label={i18nT('apps.meetings.note.title')}
     >
       <div className="flex-none px-3 py-2.5 border-b border-border flex items-center justify-between gap-2">
@@ -185,6 +235,12 @@ export default function NoteSidebar({
         </div>
       </div>
 
+      {/* No `askAgent`. The hand-off navigates to a chat, which unmounts this panel
+          and destroys `draft` — and this notice is on screen precisely because the
+          draft is the only copy of the note. Handing an unsaved note to an agent is
+          the one thing this panel must not offer. */}
+      {failure ? <ErrorNotice className="flex-none m-3 mb-0" message={failure} /> : null}
+
       {preview ? (
         // `BasePathCtx` is what makes `![10:23](images/xxx.png)` work: the shared
         // renderer resolves a relative image src against this path and fetches it
@@ -207,6 +263,10 @@ export default function NoteSidebar({
           // are different things, and giving both the same accessible name makes them
           // indistinguishable to a screen reader (and ambiguous to a test).
           aria-label={i18nT('apps.meetings.note.editorLabel')}
+          // Read-only while the load failed, so the refusal is visible BEFORE a
+          // paragraph is typed. Suppressing the save alone would let the footer sit
+          // at "Unsaved changes" with no way to reach "Saved".
+          readOnly={!!loadError}
           spellCheck
           // The cue is an INSET ring: the panel is `overflow-hidden`, so the global
           // `:focus-visible` outline (2px, offset 2px, painted outside the box) would

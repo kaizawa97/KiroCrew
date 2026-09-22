@@ -390,6 +390,13 @@ export function useMeetingSession({ eventId, fallbackTitle, config, notify }: Op
     // further down (referencing it here would be a use-before-init), and its one
     // special case — the 409 "another meeting is active" — cannot arise for a note.
     onError: () => notify(i18nT('apps.meetings.session.noteSaveFailed'), { type: 'error' }),
+    // Serialized, the way ChatPanel serializes its hidden-models save and for the
+    // same ordering reason. Concurrent saves are ordinary here (the debounce timer
+    // plus the blur, preview and unmount flushes), and out-of-order completion let
+    // the OLDER response seed the cache last, which the panel's adopt effect then
+    // put back in the field over newer text. Completions in send order self-heal,
+    // so keeping them in send order is the whole fix.
+    scope: { id: `meetings-note-${meetingId}` },
   })
 
   /**
@@ -888,6 +895,12 @@ export function useMeetingSession({ eventId, fallbackTitle, config, notify }: Op
       updatedAt: noteQuery.data?.updated_at ?? '',
       path: noteQuery.data?.path ?? '',
       saving: noteMutation.isPending,
+      saveFailed: noteMutation.isError,
+      // The initial GET's own failure, carried as the server's sentence. A failed
+      // load leaves the textarea EMPTY, which reads as "no note yet" — and typing
+      // into that is how an existing note gets overwritten with a fresh one. The
+      // panel therefore has to say so in place, not only in a toast that fades.
+      loadError: noteQuery.isError ? (noteQuery.error as Error).message : '',
     },
     setNoteOpen,
     saveNote: (content: string) => noteMutation.mutate(content),

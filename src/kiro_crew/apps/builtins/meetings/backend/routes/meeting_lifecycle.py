@@ -741,10 +741,23 @@ async def handle_delete_output(request: web.Request) -> web.Response:
 
 
 async def handle_get_note(request: web.Request) -> web.Response:
-    """The user's own note for a meeting."""
+    """The user's own note for a meeting.
+
+    A read failure is a 500 rather than an empty note, and that distinction is the
+    whole handler: the panel shows an empty note as an empty textarea and autosaves
+    over it, so "" for a note that exists but cannot be read would delete it.
+    """
     meeting_id = _meeting_id(request)
     root = data_root(request)
-    note = await asyncio.to_thread(store.read_note, meeting_id, root)
+    try:
+        note = await asyncio.to_thread(store.read_note, meeting_id, root)
+    except OSError as exc:
+        logger.warning("meetings: could not read the note for %s: %s", meeting_id, exc)
+        raise BadRequest(
+            "the note could not be read from disk",
+            status=500,
+            code="note_unreadable",
+        ) from exc
     return web.json_response(note)
 
 
@@ -781,9 +794,47 @@ async def handle_put_note(request: web.Request) -> web.Response:
         raise BadRequest("content must be a string")
     if len(content) > k.MAX_NOTE_CHARS:
         raise BadRequest(f"content must be at most {k.MAX_NOTE_CHARS} characters")
+    # JSON's ``\udXXX`` escapes can decode into UNPAIRED surrogates, which are valid
+    # Python str but not encodable UTF-8 — ``atomic_write`` would raise and the
+    # autosave would answer 500. The same guard, for the same reason, as the minutes
+    # PUT above: a body that cannot be stored is a client error, not a server one.
+    try:
+        content.encode("utf-8")
+    except UnicodeEncodeError:
+        raise BadRequest(
+            "content contains unpaired surrogate characters", code="content_not_unicode"
+        )
 
-    note = await asyncio.to_thread(store.write_note, meeting_id, content, root)
+    note = await asyncio.to_thread(_save_note, meeting_id, content, root)
     return web.json_response({"ok": True, **note})
+
+
+def _save_note(meeting_id: str, content: str, root: Any) -> dict[str, Any]:
+    """Validate the meeting exists, then persist the note. BLOCKING.
+
+    Shares the metadata transaction with deletion, for the same reason ``_save_edit``
+    does: ``store.write_note`` does ``mkdir(parents=True)`` before writing, so a save
+    for an unknown meeting created the directory, and a debounced autosave (or the
+    panel's unmount flush) landing just after a delete recreated it holding nothing
+    but the note and no ``session.json``. Two ordered statements would not do — a
+    delete landing between the check and the write leaves the same orphan.
+    """
+    with store.meta_transaction():
+        if store.read_meeting_meta(meeting_id, root) is None:
+            raise BadRequest("meeting not found", status=404, code="meeting_not_found")
+        return store.write_note(meeting_id, content, root)
+
+
+def _save_note_image(meeting_id: str, filename: str, data: bytes, root: Any) -> None:
+    """The same guard as :func:`_save_note`, for a pasted image. BLOCKING.
+
+    ``store.write_note_image`` creates the images directory the same way, so a paste
+    racing a delete recreated the meeting directory holding one orphaned image.
+    """
+    with store.meta_transaction():
+        if store.read_meeting_meta(meeting_id, root) is None:
+            raise BadRequest("meeting not found", status=404, code="meeting_not_found")
+        store.write_note_image(meeting_id, filename, data, root)
 
 
 def _note_image_alt(meeting_id: str, root: Any) -> str:
@@ -887,7 +938,7 @@ async def handle_post_note_image(request: web.Request) -> web.Response:
         raise BadRequest("not a PNG, JPEG, GIF or WebP image")
 
     filename = f"{uuid.uuid4().hex}{ext}"
-    await asyncio.to_thread(store.write_note_image, meeting_id, filename, bytes(data), root)
+    await asyncio.to_thread(_save_note_image, meeting_id, filename, bytes(data), root)
     alt = await asyncio.to_thread(_note_image_alt, meeting_id, root)
     audit("meetings.note_image", f"{meeting_id} {filename}", outcome="ok")
     logger.info("meetings: stored a note image for %s (%d bytes)", meeting_id, len(data))
@@ -902,7 +953,6 @@ async def handle_post_note_image(request: web.Request) -> web.Response:
             "filename": filename,
             "src": f"{k.NOTE_IMAGES_DIR}/{filename}",
             "alt": alt,
-            "content_type": images.CONTENT_TYPES.get(ext, "application/octet-stream"),
         }
     )
 

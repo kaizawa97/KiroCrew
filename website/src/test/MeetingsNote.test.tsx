@@ -21,6 +21,7 @@ const StoreSource = readFileSync(
 )
 
 const NOTE = EN_CATALOG.apps.meetings.note
+const SESSION = EN_CATALOG.apps.meetings.session
 
 function setup(over: Partial<Parameters<typeof NoteSidebar>[0]> = {}) {
   const onSave = vi.fn()
@@ -32,6 +33,8 @@ function setup(over: Partial<Parameters<typeof NoteSidebar>[0]> = {}) {
       updatedAt=""
       path="/data/meetings/m1/_note.md"
       saving={false}
+      saveFailed={false}
+      loadError=""
       onUploadImage={onUploadImage}
       onSave={onSave}
       onClose={onClose}
@@ -186,7 +189,7 @@ describe('NoteSidebar', () => {
     expect(field.value).toBe('written elsewhere')
   })
 
-  it('answers "did it save?" in each of its three states', () => {
+  it('answers "did it save?" in each of its four states', () => {
     const idle = setup({ content: 'x', updatedAt: '2026-08-04T00:00:00Z' })
     expect(screen.getByText(NOTE.saved)).toBeTruthy()
     idle.view.unmount()
@@ -198,6 +201,82 @@ describe('NoteSidebar', () => {
     const dirty = setup()
     dirty.type('typing')
     expect(screen.getByText(NOTE.unsaved)).toBeTruthy()
+    dirty.view.unmount()
+
+    // The state that used to lie. `flush` advances `savedRef` before the PUT
+    // resolves, so on failure the text compares EQUAL to "what the server has" and
+    // the footer showed "Saved" over a note that was never stored — a user who
+    // closes the panel on that reading loses it.
+    const failed = setup({ content: 'x', updatedAt: '2026-08-04T00:00:00Z', saveFailed: true })
+    expect(screen.queryByText(NOTE.saved)).toBeNull()
+    expect(screen.getByText(NOTE.unsaved)).toBeTruthy()
+    failed.view.unmount()
+  })
+
+  it('retries a refused save instead of stranding it', () => {
+    // The loss this closes: `savedRef` advances when a save is SENT, so after a
+    // refusal it equals the draft and `flush` used to return early -- the footer read
+    // "Unsaved changes" while nothing ever resent, and closing the panel dropped the
+    // note. Blur is one exit from that state.
+    const { field, onSave } = setup({ content: 'x', saveFailed: true })
+    expect(onSave).not.toHaveBeenCalled()
+    fireEvent.blur(field)
+    expect(onSave).toHaveBeenCalledWith('x')
+  })
+
+  it('retries a refused save when the panel closes', () => {
+    // The exit that actually loses the note, so it is pinned separately.
+    const { view, onSave } = setup({ content: 'x', saveFailed: true })
+    view.unmount()
+    expect(onSave).toHaveBeenCalledWith('x')
+  })
+
+  it('does not resend an unchanged note that saved cleanly', () => {
+    // The guard the retry must not trample: with no failure, an unmount on untouched
+    // text must stay silent, or every panel close writes the note again.
+    const { view, onSave } = setup({ content: 'x', updatedAt: '2026-08-04T00:00:00Z' })
+    view.unmount()
+    expect(onSave).not.toHaveBeenCalled()
+  })
+})
+
+// The panel's own error surface. A toast fades; "your note is not on disk" is a
+// state, and the rule the dashboard holds itself to (`errors-use-error-notice`) is
+// that a state like that is rendered where the user is working.
+describe('a failure the user can act on is shown in the panel', () => {
+  it('renders a notice when the save was refused', () => {
+    setup({ content: 'x', updatedAt: '2026-08-04T00:00:00Z', saveFailed: true })
+    const alert = screen.getByRole('alert')
+    expect(alert.textContent).toContain(SESSION.noteSaveFailed)
+  })
+
+  it('renders the server sentence when the note could not be loaded', () => {
+    // A failed GET leaves the field empty, which reads as "no note yet" -- so the
+    // panel has to say otherwise before the user types over a note that exists.
+    setup({ loadError: 'note directory is not readable' })
+    expect(screen.getByRole('alert').textContent).toContain('note directory is not readable')
+  })
+
+  it('shows the save refusal when both failed, because that is the one that loses text', () => {
+    setup({ content: 'x', saveFailed: true, loadError: 'note directory is not readable' })
+    const alert = screen.getByRole('alert')
+    expect(alert.textContent).toContain(SESSION.noteSaveFailed)
+    expect(alert.textContent).not.toContain('note directory is not readable')
+  })
+
+  it('stays quiet when nothing failed', () => {
+    setup({ content: 'x', updatedAt: '2026-08-04T00:00:00Z' })
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('offers NO agent hand-off, because the draft is the only copy of the note', () => {
+    // The hand-off navigates to a chat, which unmounts this panel and destroys the
+    // draft -- and the notice is on screen precisely because the draft is not on
+    // disk. This is the reason the prop is opt-in, asserted rather than trusted.
+    setup({ content: 'x', saveFailed: true })
+    // The hand-off is the only control ErrorNotice renders here, so its absence is
+    // the absence of any button inside the alert.
+    expect(screen.getByRole('alert').querySelector('button')).toBeNull()
   })
 })
 
@@ -335,6 +414,26 @@ describe('note wiring', () => {
     expect(block![0]).toContain('noteOpen')
   })
 
+  it('hands the GET failure out so the panel can render it', () => {
+    // Without this the only trace of a failed load is an empty textarea.
+    expect(SessionSource).toContain('loadError: noteQuery.isError')
+  })
+
+  it('serializes saves, so an older response cannot seed the cache last', () => {
+    // The bug without this: two debounced saves are in flight, the OLDER response
+    // completes last, `onSuccess` seeds the cache with its stale content, and the
+    // panel's adopt effect (`content !== savedRef.current`) puts the older text back
+    // in the field. Completions in SEND order self-heal, so serializing is the whole
+    // fix. Asserted on the source because the ordering lives in React Query's
+    // mutation scope rather than in code this suite can drive: the hook needs a live
+    // QueryClient and a real fetch boundary, and a test that stubbed both would be
+    // asserting the stub. `scope` is the same mechanism ChatPanel uses on the
+    // hidden-models save, for the same reason.
+    const block = SessionSource.match(/const noteMutation = useMutation\(\{[\s\S]*?\n {2}\}\)/)
+    expect(block).toBeTruthy()
+    expect(block![0]).toContain('scope: {')
+  })
+
   it('seeds the cache from the save response instead of invalidating', () => {
     // An invalidate would refetch and hand the editor a value mid-keystroke.
     const block = SessionSource.match(/const noteMutation = useMutation\(\{[\s\S]*?\n {2}\}\)/)
@@ -352,5 +451,51 @@ describe('the note filename cannot be owned by an agent', () => {
     // that the filename is a security property rather than a style choice.
     expect(StoreSource).toContain('k.NOTE_FILE')
     expect(StoreSource).toContain('un-ownable by any agent')
+  })
+})
+
+describe('a note that failed to load is never autosaved over', () => {
+  // The whole point of the load notice: the field is empty because the GET failed,
+  // NOT because the note is empty. Typing into it and letting the debounce fire
+  // would replace a note that exists on disk with whatever the user just typed,
+  // and the note is the one thing in this app they cannot regenerate.
+
+  it('does not save when the debounce fires', () => {
+    const { onSave, type } = setup({ loadError: 'the note could not be read' })
+    type('typed into what looked like an empty note')
+    act(() => { vi.advanceTimersByTime(1000) })
+    expect(onSave).not.toHaveBeenCalled()
+  })
+
+  it('does not save on blur', () => {
+    const { onSave, field, type } = setup({ loadError: 'the note could not be read' })
+    type('clicked away')
+    act(() => { fireEvent.blur(field) })
+    expect(onSave).not.toHaveBeenCalled()
+  })
+
+  it('does not save on unmount, the path that closing the panel takes', () => {
+    const { view, onSave, type } = setup({ loadError: 'the note could not be read' })
+    type('half a thought')
+    view.unmount()
+    expect(onSave).not.toHaveBeenCalled()
+  })
+
+  it('makes the field read-only, so the block is visible before anything is typed', () => {
+    // Suppressing the save alone would let someone type a paragraph and watch the
+    // footer never reach "Saved". The field says up front that it is not editable.
+    const { field } = setup({ loadError: 'the note could not be read' })
+    expect(field.readOnly).toBe(true)
+  })
+
+  it('still autosaves, and stays editable, once the note loaded', () => {
+    // The guard must key off the load failure and nothing else. One render per
+    // test: a second `setup()` in the same test renders a second panel, and the
+    // field lookup then matches both.
+    const { onSave, type, field } = setup()
+    expect(field.readOnly).toBe(false)
+    type('decision: ship')
+    act(() => { vi.advanceTimersByTime(1000) })
+    expect(onSave).toHaveBeenCalledWith('decision: ship')
   })
 })

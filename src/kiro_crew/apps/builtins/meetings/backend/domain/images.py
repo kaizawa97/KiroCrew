@@ -1,9 +1,13 @@
 """Image sniffing for images pasted into a meeting note.
 
 The one job here is deciding what a pasted blob actually IS, from its bytes, and
-refusing everything else. That decision is the whole security boundary for note
-images, so it is a separate module with its own tests rather than a few lines
-inside a request handler.
+refusing everything else.
+
+The magic table itself is NOT here. :mod:`kiro_crew.messaging.raster` owns it, and
+its module docstring gives the reason a second copy must not exist: "a second copy
+of the magic table is how one direction ends up accepting a type the other
+rejects." What belongs to a note is the ALLOWLIST on top of that shared answer,
+which is exactly the per-consumer narrowing ``raster`` reserves for its callers.
 
 Two properties are deliberate and worth not "simplifying":
 
@@ -15,48 +19,31 @@ and then verifies the magic bytes MATCH the claimed extension — a sound design
 a general-purpose uploader that must preserve names, but for a pasted screenshot
 the name is worthless, and not accepting one removes a whole class of question.
 
-**Refusal is the default.** An unrecognised signature returns ``None``. That is
-what keeps SVG out: an SVG has no binary signature, so the core uploader's
-``_content_matches_ext`` fails OPEN for ``.svg`` (its docstring says so), and an
-SVG is not really an image — it is a document that can carry ``<script>`` and
-``on*`` handlers, which is why ``pptx_maker`` classifies ``image/svg+xml`` as
-script-capable and ``files.py`` refuses to serve one inline. A note never needs
-one, so the cheapest correct answer is to not accept it at all.
+**Refusal is the default.** A type missing from the allowlist returns ``None``.
+That is what keeps SVG and BMP out — SVG because it has no binary signature to
+sniff at all (the core uploader's ``_content_matches_ext`` fails OPEN for ``.svg``,
+and an SVG is a document that can carry ``<script>`` and ``on*`` handlers, which is
+why ``pptx_maker`` classifies ``image/svg+xml`` as script-capable), and BMP because
+nothing produces BMP screenshots. Neither is named below, and omission is the
+whole mechanism: a type added to the shared table does not silently widen a note.
 """
 
 from __future__ import annotations
 
 from typing import Optional
 
-#: ``(magic prefix, canonical extension)`` for the raster formats a note may embed.
+from kiro_crew.messaging.raster import SNIFF_BYTES, sniff_raster_mime
+
+#: Sniffed type -> the canonical extension a note stores it under.
 #:
-#: Deliberately narrow. BMP is omitted (its ``BM`` signature is two bytes, which is
-#: weak, and nothing produces BMP screenshots), and every vector or document format
-#: is omitted because a note image is a screenshot, not an attachment.
-_IMAGE_SIGNATURES: tuple[tuple[bytes, str], ...] = (
-    (b"\x89PNG\r\n\x1a\n", ".png"),
-    (b"\xff\xd8\xff", ".jpg"),
-    (b"GIF87a", ".gif"),
-    (b"GIF89a", ".gif"),
-)
-
-#: WebP is a RIFF container: ``RIFF`` + 4 little-endian size bytes + ``WEBP``. The
-#: split check is why it cannot live in the flat prefix table above.
-_RIFF_PREFIX = b"RIFF"
-_WEBP_TAG = b"WEBP"
-_WEBP_TAG_OFFSET = 8
-
-#: Longest prefix any check needs, so a caller can sniff without buffering a file.
-MIN_SNIFF_BYTES = _WEBP_TAG_OFFSET + len(_WEBP_TAG)
-
-#: Extension -> the content type ``/api/file-raw`` will independently re-derive when
-#: it serves the file back. Kept here only so the upload response can name the type
-#: it accepted; nothing trusts it later.
-CONTENT_TYPES: dict[str, str] = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
+#: Deliberately narrower than the shared table: ``image/bmp`` is absent (its ``BM``
+#: signature is two bytes, which is weak, and nothing produces BMP screenshots),
+#: and every vector or document format is absent from the shared table already.
+_EXT_BY_MIME: dict[str, str] = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
 }
 
 
@@ -64,20 +51,15 @@ def sniff_image_ext(data: bytes) -> Optional[str]:
     """The canonical extension for *data*, or ``None`` if it is not an image we take.
 
     ``None`` is the answer for an empty body, a truncated header, a text file
-    renamed to ``.png``, an SVG, a PDF, and anything else unrecognised — the
-    refusal is the default rather than a special case.
+    renamed to ``.png``, an SVG, a BMP, a PDF, and anything else outside
+    :data:`_EXT_BY_MIME` — the refusal is the default rather than a special case.
     """
     if not data:
         return None
-    for prefix, ext in _IMAGE_SIGNATURES:
-        if data.startswith(prefix):
-            return ext
-    if (
-        data.startswith(_RIFF_PREFIX)
-        and data[_WEBP_TAG_OFFSET : _WEBP_TAG_OFFSET + len(_WEBP_TAG)] == _WEBP_TAG
-    ):
-        return ".webp"
-    return None
+    mime = sniff_raster_mime(data[:SNIFF_BYTES])
+    if mime is None:
+        return None
+    return _EXT_BY_MIME.get(mime)
 
 
 def format_elapsed(seconds: float) -> str:

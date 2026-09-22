@@ -28,6 +28,7 @@ from meetings_helpers import (  # noqa: F401 — fixtures are used by name
 from kiro_crew.apps.builtins.meetings.backend import constants as k
 from kiro_crew.apps.builtins.meetings.backend import store
 from kiro_crew.apps.builtins.meetings.backend.domain import images
+from kiro_crew.messaging.raster import SNIFF_BYTES
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
 JPEG = b"\xff\xd8\xff\xe0" + b"\x00" * 32
@@ -49,6 +50,20 @@ async def _upload(client, body: bytes, *, meeting: str = "m1", field: str = "fil
 # ---------------------------------------------------------------------------
 # Sniffing
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture(name="_seed_meetings", autouse=True)
+def seed_meetings_fixture(root: Path) -> None:
+    """Create the meetings these tests address.
+
+    The note mutations share deletion's existence transaction, so a save for a
+    meeting that was never created is a 404 BY DESIGN (see
+    ``TestAMutationCannotCreateOrRecreateAMeeting``). Seeding the metadata here keeps
+    every other test about the note rather than about setup. Ids these tests expect to
+    be absent (``missing``, ``never-existed``) are deliberately NOT seeded.
+    """
+    for meeting_id in ("m1", "m2"):
+        store.write_meeting_meta(meeting_id, store.new_meeting_meta(meeting_id, meeting_id), root)
 
 
 class TestSniffImageExt:
@@ -87,8 +102,8 @@ class TestSniffImageExt:
 
     def test_sniffing_needs_no_more_than_the_advertised_prefix(self):
         # So a caller can decide from a header rather than buffering a whole file.
-        assert images.sniff_image_ext(PNG[: images.MIN_SNIFF_BYTES]) == ".png"
-        assert images.sniff_image_ext(WEBP[: images.MIN_SNIFF_BYTES]) == ".webp"
+        assert images.sniff_image_ext(PNG[:SNIFF_BYTES]) == ".png"
+        assert images.sniff_image_ext(WEBP[:SNIFF_BYTES]) == ".webp"
 
 
 class TestFormatElapsed:
@@ -183,7 +198,6 @@ class TestUpload:
         # Relative, so the dashboard's markdown renderer resolves it against the
         # note's own location — which is what avoids a second serving route here.
         assert body["src"] == f"{k.NOTE_IMAGES_DIR}/{body['filename']}"
-        assert body["content_type"] == "image/png"
         assert store.note_image_path("m1", body["filename"], root).read_bytes() == PNG
 
     @pytest.mark.asyncio
@@ -313,3 +327,19 @@ class TestAltText:
             resp = await _upload(client, PNG)
             assert resp.status == 200
             assert (await resp.json())["alt"] == ""
+
+
+class TestAPasteCannotCreateOrRecreateAMeeting:
+    """Same deletion guard as the note save, for the image writer beside it.
+
+    ``store.write_note_image`` also does ``mkdir(parents=True)``, so a paste racing a
+    delete recreated the meeting directory holding one orphaned image.
+    """
+
+    @pytest.mark.asyncio
+    async def test_a_paste_for_an_unknown_meeting_is_404_and_writes_nothing(self, app, root: Path):
+        async with client_for(app) as client:
+            resp = await _upload(client, PNG, meeting="missing")
+            assert resp.status == 404
+            assert (await resp.json())["code"] == "meeting_not_found"
+        assert not (store.meetings_root(root) / "missing").exists()
