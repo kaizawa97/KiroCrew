@@ -1960,8 +1960,8 @@ def _resolve_command_shell() -> str | None:
     # agent-writable directory that precedes /bin — an agent can plant
     # ``~/.local/bin/sh`` that fingerprints the probe input, passes the strict
     # test, then does something different when called with the real cron. Even
-    # inside `cc`-mode isolation the agent-planted binary runs, and `cc` leaves
-    # ``.ssh`` reachable, so this is a private-key-exposure vector. Instead,
+    # inside `strict`-mode isolation the agent-planted binary runs, so this is a
+    # code-execution vector the sandbox does not remove. Instead,
     # walk a small fixed list of trusted system shell paths (never a bash
     # fallback: bash brace expansion hides `cat ~/.a{w,w}s/credentials` from
     # the tokenizer). Some hosts (macOS /bin/sh is bash-in-POSIX-mode) still
@@ -2086,17 +2086,21 @@ def run_command_sandboxed(
     # raised error -- would leak the claim and _begin_spawn would then refuse
     # every future wake of this job for the life of the process.
     spawn_claimed = True
-    # mode="cc" (not "standard"): the command string is fully model-supplied via
-    # cron_add and executes outside the kiro-cli ACP permission/hook flow, so this
-    # is a low-trust exec path. "cc" hides the credential dirs/files (.aws, .kube,
-    # .netrc, .git-credentials, .npmrc, .pypirc, .kirocrew/.env) and scrubs the
-    # agent-denied env keys, while deliberately leaving ~/.ssh reachable so a
-    # legitimate command cron can still do git/scp/rsync over SSH. "strict" would
-    # additionally hide ~/.ssh but break those workflows; the residual .ssh
-    # exposure is covered by the storage-time deny-list (mcp_cron._vet_shell_command,
-    # which blocks any .ssh reference) — the primary control. This sandbox is
-    # defense-in-depth and is bypassed when the OS backend falls back to "none"
-    # (e.g. macOS >= 26 — see _clean_cron_env).
+    # mode="strict" (not "cc" or "standard"): the command string is fully
+    # model-supplied via cron_add and executes outside the kiro-cli ACP
+    # permission/hook flow, so this is a low-trust exec path. "strict" hides the
+    # credential dirs/files (.aws, .kube, .config/gh, .netrc, .git-credentials,
+    # .npmrc, .pypirc, .kirocrew/.env), masks ~/.ssh down to known_hosts, and
+    # scrubs the agent-denied env keys. "cc" was used before and left ~/.ssh (and,
+    # on macOS, ~/.aws) readable, which made the storage-time text vet
+    # (mcp_cron._vet_shell_command) the ONLY barrier between model-authored shell
+    # and the operator's private keys -- and a regex over a shell string cannot be
+    # that barrier (`cd ~/.ssh;cat id_rsa` slipped past it). The cost is that a
+    # command cron can no longer authenticate over SSH with an on-disk key
+    # (SSH_AUTH_SOCK is scrubbed in every tier already); such jobs belong in a
+    # script cron. This sandbox is bypassed when the OS backend falls back to
+    # "none" (e.g. macOS >= 26 — see _clean_cron_env), where the vet is all that
+    # remains.
     #
     # wrap_argv is INSIDE the try: on a host with no OS sandbox backend (every
     # Windows host) it fail-closes by raising, and outside the try that escaped
@@ -2122,7 +2126,7 @@ def run_command_sandboxed(
                 "exit_code": -1,
             }
         argv = [shell, "-c", command]
-        sandboxed_argv, sandbox_cleanup = wrap_argv(argv, mode="cc")
+        sandboxed_argv, sandbox_cleanup = wrap_argv(argv, mode="strict")
         sandboxed_argv = cgroup_scope_argv(sandboxed_argv)  # cgroup DoS ceiling
         clean_env = _clean_cron_env()
         if _spawn_cancelled(job_id):

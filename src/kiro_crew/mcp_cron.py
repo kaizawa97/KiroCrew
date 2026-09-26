@@ -126,17 +126,26 @@ def _sub_floor_timeout_note(timeout_secs_val: object) -> str:
 
 
 # Credential dirs/files a cron shell command must never reference directly. The
-# sandbox (cron_script.run_command_sandboxed, mode="cc") is the only
+# sandbox (cron_script.run_command_sandboxed, mode="strict") is the only
 # sanctioned access path. We reuse security._SENSITIVE_HOME_DIRS (the canonical
 # list, kept DRY so it can't drift) and match the token ANYWHERE in the command
 # -- the shared is_sensitive_bash_command matches no paths at all (the OS sandbox
 # is its path control) -- because tools such as ``curl -d @~/.aws/credentials`` or
 # ``wget --post-file=$HOME/.ssh/id_rsa`` read files via flags with no recognizable
 # read-command prefix.
+#
+# Both boundaries are "any character that cannot continue a path name", not an
+# enumerated delimiter set: an enumerated set omitted the shell operators, so a
+# sensitive directory named as the last word of a simple command
+# (`cd ~/.ssh;cat id_rsa`, `cd ~/.ssh&&...`, `(cd ~/.ssh)`) or read through a
+# glued redirect (`cd;cat<.ssh/id_rsa`) matched nothing. A backslash does not
+# open a name: in a script body it is a regex escape (`r"\.kiro/crew/..."`), and
+# in a command `_vet_shell_command` also scans an unescaped variant, which turns
+# `\.ssh` back into `.ssh`.
 _CRON_CRED_PATH_RE = re.compile(
-    r"(?:^|[\s'\"=@/~`]|\$\{?HOME\}?)"
+    r"(?:(?<![A-Za-z0-9_.\\-])|\$\{?HOME\}?)"
     r"(?:" + "|".join(re.escape(d) for d in _SENSITIVE_HOME_DIRS) + r")"
-    r"(?:/|\s|['\"]|$)",
+    r"(?![A-Za-z0-9_.-])",
     re.IGNORECASE,
 )
 # Protected secret env vars a cron command must not read by name. Union of the

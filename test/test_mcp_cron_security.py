@@ -187,6 +187,22 @@ MALICIOUS_COMMANDS = [
     "cat ~/.$@/id_rsa",
     "echo $*",
     "echo ${1}",
+    # A sensitive directory named as the LAST word of a simple command is
+    # followed by a shell operator, not a slash/space/quote: the trailing
+    # boundary must be "any non-path character", or `cd ~/.ssh;` names the
+    # directory and the next command reads the key relative to it.
+    "cd ~/.ssh;cat id_rsa",
+    "cd $HOME/.ssh&&base64 -w 30 id_ed25519",
+    "cd ~/.ssh||true;cat id_rsa",
+    "cd ~/.ssh|cat",
+    "(cd ~/.ssh)",
+    "(cd ~/.ssh;cat id_rsa)",
+    "cd ~/.aws;cat credentials",
+    "cd ${HOME}/.ssh>/dev/null;od -An -tx1 id_rsa",
+    # The same on the LEADING boundary: a glued redirect or operator right
+    # before a home-relative name.
+    "cd;cat<.ssh/id_rsa",
+    "cd&&cat<.aws/credentials",
 ]
 
 # Shapes that LOOK like the smuggling patterns above but cannot actually reach a
@@ -251,6 +267,11 @@ BENIGN_COMMANDS = [
     # trip the loop gate — it is only refused in command-word position.
     "git log --format=for",
     "echo 'while you were out'",
+    # Names that merely CONTAIN a sensitive directory name are not it: the
+    # boundaries are path characters, so these stay allowed.
+    "ls ~/.sshd_backup;date",
+    "cat ~/notes.aws.txt",
+    "cd ~/my.ssh;ls",
 ]
 
 
@@ -646,14 +667,16 @@ class TestCronEnvScrubbing:
         assert env.get("PATH_KEEP_ME") == "/usr/bin"
 
 
-# ── Fix 2: command exec uses the cc sandbox ───────────────────────────────
+# ── Fix 2: command exec uses the strict sandbox ───────────────────────────
 
-def test_run_command_uses_cc_sandbox(monkeypatch):
-    """run_command_sandboxed must call wrap_argv with mode='cc'.
+def test_run_command_uses_strict_sandbox(monkeypatch):
+    """run_command_sandboxed must call wrap_argv with mode='strict'.
 
-    'cc' hides credential dirs/files and scrubs the agent-denied env keys while
-    leaving ~/.ssh reachable for legitimate git/scp/rsync command crons; the
-    .ssh path is covered by the storage-time deny-list instead.
+    'cc' left ~/.ssh (and on macOS ~/.aws) readable, so the storage-time text
+    vet was the only barrier between a model-authored command and the
+    operator's private keys, and `cd ~/.ssh;cat id_rsa` slipped past it.
+    'strict' masks ~/.ssh down to known_hosts, so a vet miss no longer yields
+    the key.
     """
     import kiro_crew.cron_script as cs
 
@@ -669,7 +692,7 @@ def test_run_command_uses_cc_sandbox(monkeypatch):
     # sandbox MODE, not shell resolution — feed it a resolved shell.
     monkeypatch.setattr(cs, "_resolve_command_shell", lambda: "sh")
     cs.run_command_sandboxed("echo hi", timeout=5)
-    assert captured.get("mode") == "cc"
+    assert captured.get("mode") == "strict"
 
 
 # ── Fix 3: defaults.json no longer auto-approves cron_add ──────────────────
