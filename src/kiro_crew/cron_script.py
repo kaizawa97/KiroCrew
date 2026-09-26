@@ -59,7 +59,13 @@ from kiro_crew.sandbox import (
     wrap_argv,
 )
 from kiro_crew.secrets import SecretVault
-from kiro_crew.security import is_sensitive_path, redact
+from kiro_crew.security import (
+    _CREW_HOME_PREFIXES,
+    _SENSITIVE_HOME_DIRS,
+    is_sensitive_path,
+    redact,
+    sandbox_credential_targets,
+)
 from kiro_crew.sel import sel
 
 # Env vars stripped from EVERY cron subprocess (command and script), regardless
@@ -2029,6 +2035,29 @@ def _shell_is_posix_strict(shell: str) -> bool:
     return result
 
 
+def _command_cron_hidden_targets() -> tuple[str, ...]:
+    """Every read-floor credential store outside the crew home, for a command cron's mask.
+
+    No sandbox tier lists the ACP adapters' own OAuth tokens (``.codex/auth.json``,
+    ``.claude/.credentials.json``) or the kiro-cli / amazon-q identity stores -- the
+    agent's own harness must read them -- so ``strict`` alone left them readable to
+    a command cron, which drives no harness. Deriving the set from the read gate's
+    floor (``security._SENSITIVE_HOME_DIRS``, anchored by
+    ``sandbox_credential_targets`` so a ``CLAUDE_CONFIG_DIR`` / ``CODEX_HOME``
+    relocation is followed) means a store added there later is masked here with no
+    second list to update. Crew-home leaves are excluded: the sandbox already gives
+    each one a disposition, and hiding a READONLY ceiling would remove it. ``.ssh``
+    is excluded because ``strict`` masks it itself while keeping ``known_hosts``;
+    a whole-directory mask here would take host-key verification with it.
+    """
+    excluded = tuple(
+        d
+        for d in _SENSITIVE_HOME_DIRS
+        if d == ".ssh" or any(d == p or d.startswith(p + "/") for p in _CREW_HOME_PREFIXES)
+    )
+    return sandbox_credential_targets(excluded)
+
+
 def run_command_sandboxed(
     command: str,
     timeout: int = 300,
@@ -2091,16 +2120,16 @@ def run_command_sandboxed(
     # permission/hook flow, so this is a low-trust exec path. "strict" hides the
     # credential dirs/files (.aws, .kube, .config/gh, .netrc, .git-credentials,
     # .npmrc, .pypirc, .kirocrew/.env), masks ~/.ssh down to known_hosts, and
-    # scrubs the agent-denied env keys. "cc" was used before and left ~/.ssh (and,
-    # on macOS, ~/.aws) readable, which made the storage-time text vet
-    # (mcp_cron._vet_shell_command) the ONLY barrier between model-authored shell
-    # and the operator's private keys -- and a regex over a shell string cannot be
-    # that barrier (`cd ~/.ssh;cat id_rsa` slipped past it). The cost is that a
-    # command cron can no longer authenticate over SSH with an on-disk key
-    # (SSH_AUTH_SOCK is scrubbed in every tier already); such jobs belong in a
-    # script cron. This sandbox is bypassed when the OS backend falls back to
-    # "none" (e.g. macOS >= 26 — see _clean_cron_env), where the vet is all that
-    # remains.
+    # scrubs the agent-denied env keys; _command_cron_hidden_targets() adds the
+    # adapter OAuth tokens and kiro-cli identity stores no tier lists. "cc" was
+    # used before and left ~/.ssh (and, on macOS, ~/.aws) readable, which made the
+    # storage-time text vet (mcp_cron._vet_shell_command) the ONLY barrier between
+    # model-authored shell and the operator's private keys -- and a regex over a
+    # shell string cannot be that barrier (`cd ~/.ssh;cat id_rsa` slipped past
+    # it). The cost: a command cron can no longer authenticate over SSH with an
+    # on-disk key (SSH_AUTH_SOCK is scrubbed in every tier already), read
+    # ~/.aws/config (cc re-exposed it for credential_process), use the gh CLI's
+    # stored login, or drive kiro-cli / q. Such jobs belong in a script cron.
     #
     # wrap_argv is INSIDE the try: on a host with no OS sandbox backend (every
     # Windows host) it fail-closes by raising, and outside the try that escaped
@@ -2126,7 +2155,9 @@ def run_command_sandboxed(
                 "exit_code": -1,
             }
         argv = [shell, "-c", command]
-        sandboxed_argv, sandbox_cleanup = wrap_argv(argv, mode="strict")
+        sandboxed_argv, sandbox_cleanup = wrap_argv(
+            argv, mode="strict", extra_hidden_dirs=_command_cron_hidden_targets()
+        )
         sandboxed_argv = cgroup_scope_argv(sandboxed_argv)  # cgroup DoS ceiling
         clean_env = _clean_cron_env()
         if _spawn_cancelled(job_id):

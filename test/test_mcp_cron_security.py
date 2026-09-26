@@ -7,7 +7,7 @@ files / secret env vars and exfiltrated them, because the command ran via
 
 Fixes under test:
   1. storage-time deny-list on ``command``      (_vet_shell_command)
-  2. exec-time sandbox raised to ``cc``         (run_command_sandboxed)
+  2. exec-time sandbox raised to ``strict``     (run_command_sandboxed)
   3. cron_add no longer in default allowedTools  (config/defaults.json)
   4. secret env vars scrubbed from cron env      (_clean_cron_env)
   5. storage-time scan of script contents        (_vet_script_file)
@@ -17,6 +17,7 @@ Fixes under test:
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 from pathlib import Path
@@ -272,6 +273,12 @@ BENIGN_COMMANDS = [
     "ls ~/.sshd_backup;date",
     "cat ~/notes.aws.txt",
     "cd ~/my.ssh;ls",
+    # `.gpg` is also a file EXTENSION: a glob, a braced variable or a
+    # placeholder before it names an encrypted backup, not ~/.gpg.
+    "gpg -d backups/*.gpg > /tmp/x",
+    "find . -name '*.gpg' -mtime +30 -delete",
+    "F=db; gpg -c -o ${F}.gpg db.sql",
+    "ls /data/*.netrc",
 ]
 
 
@@ -682,8 +689,9 @@ def test_run_command_uses_strict_sandbox(monkeypatch):
 
     captured = {}
 
-    def fake_wrap_argv(argv, mode="standard"):
+    def fake_wrap_argv(argv, mode="standard", **kwargs):
         captured["mode"] = mode
+        captured.update(kwargs)
         return argv, None
 
     monkeypatch.setattr(cs, "wrap_argv", fake_wrap_argv)
@@ -693,6 +701,17 @@ def test_run_command_uses_strict_sandbox(monkeypatch):
     monkeypatch.setattr(cs, "_resolve_command_shell", lambda: "sh")
     cs.run_command_sandboxed("echo hi", timeout=5)
     assert captured.get("mode") == "strict"
+    # No tier lists the adapter OAuth tokens, so the runner masks them itself
+    # (`cd ~/.claude;cat .credentials.json` passes the text vet) -- but never a
+    # crew-home READONLY ceiling, which a mask would remove rather than protect.
+    hidden = {p.replace(os.sep, "/") for p in captured.get("extra_hidden_dirs", ())}
+    home = str(Path.home()).replace(os.sep, "/")
+    assert f"{home}/.claude/.credentials.json" in hidden
+    assert f"{home}/.codex/auth.json" in hidden
+    assert not any("/.kiro/crew/" in p or "/.kirocrew/" in p for p in hidden)
+    # strict masks ~/.ssh itself and keeps known_hosts; a whole-dir mask here
+    # would hide known_hosts too.
+    assert f"{home}/.ssh" not in hidden
 
 
 # ── Fix 3: defaults.json no longer auto-approves cron_add ──────────────────

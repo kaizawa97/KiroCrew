@@ -2335,7 +2335,7 @@ CRON_ADD_SCHEMA = ToolSchema(
         # value safe to execute. The enforced security boundary for the
         # model-supplied cron command/script lives elsewhere:
         #   1. storage-time deny-list  -> mcp_cron._vet_shell_command / _vet_script_file
-        #   2. exec-time OS sandbox     -> cron_script.run_command_sandboxed (mode="cc")
+        #   2. exec-time OS sandbox     -> cron_script.run_command_sandboxed (mode="strict")
         #                                  + _clean_cron_env() env scrubbing
         # Do not treat these regexes as the guard, and do not relax them assuming
         # downstream code re-validates the value as safe.
