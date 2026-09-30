@@ -28,7 +28,7 @@ action items.
 | `.../backend/routes/` | `_common` (gate + validation + the dispatch transaction), `meeting_lifecycle`, `agents`, `audio_import`, `tasks`, `calendar`, `settings` |
 | `.../agents/*.json` | the three shipped agent specs |
 | `src/kiro_crew/builtin_skills/meetings/SKILL.md` | the bundled skill (data layout, lifecycle, provider config) |
-| `website/src/apps/meetings/` | `MeetingsPage` (list) → `MeetingView` → `TaskReviewView`, `SettingsView` |
+| `website/src/apps/meetings/` | `MeetingsPage` (list) → `MeetingView` → `TaskReviewView`, `SettingsView` (+ `components/CalendarCredentials`) |
 | `website/public/app-assets/meetings/` | icon + hero art |
 
 ## Routes
@@ -50,8 +50,8 @@ POST   /dictionary/reload           re-read from disk
 GET    /calendar                    cached events + provider + configured flag
 POST   /calendar/sync[?days=N]      fetch from the provider, replace the cache
 GET    /calendar/providers          registered calendar providers
-GET    /calendar/credentials        which providers hold credentials — field NAMES + booleans only
-PUT    /calendar/credentials        {provider, values{}} — store one provider's fields (allow-listed per provider)
+GET    /calendar/credentials        which providers hold credentials — field NAMES + booleans only, plus each provider's form shape
+PUT    /calendar/credentials        {provider, values{field: string|null}} — store / replace / clear (null) one provider's fields (allow-listed per provider)
 POST   /calendar/credentials/forget {provider} — disconnect: forget its credentials + any pending OAuth flow
 POST   /calendar/oauth/start        {provider} — begin a flow; returns {authorize_url} for the browser to open
 GET    /calendar/oauth/callback     where the provider redirects the BROWSER back; answers a small HTML page
@@ -735,6 +735,49 @@ sync). `read_config` fills the three into a `calendar` block written before they
 existed. The dashboard list re-reads the calendar cache and the meetings on disk
 every minute while it is open, so a pre-created meeting appears without a remount.
 
+### Credentials in Settings (`components/CalendarCredentials.tsx`)
+
+Settings → Calendar renders, under the provider picker, the credential form for
+the active provider. The form's shape comes from the backend: `GET
+/calendar/credentials` carries `providers`, built from the same allowlist
+(`_CREDENTIAL_FIELDS`) and OAuth table (`_OAUTH_CLIENTS`) the PUT enforces, so
+the fields shown are exactly the fields that can be written and a provider that
+takes none (`none`, `ics`) renders nothing. Every field is write-only: a stored
+value never reaches the browser, so a set field shows a mask with Replace /
+Remove (`SecretField`), a typed value is sent as a string, a removed one as
+`null`, and an untouched one is not sent at all. The status badge
+(`credentialBadge`) is derived from field names, and only an OAuth provider is
+ever called "Connected" — its refresh token exists because a sign-in against the
+real tenant succeeded. A password provider with every field stored reads
+"Credentials saved": nothing in the form has spoken to the server, so a mistyped
+password is indistinguishable from a right one until the next sync. The status
+re-reads on window focus because the OAuth consent finishes in another tab.
+The OAuth client fields carry `SecretField`'s `setupLink` to the provider's own
+console (Google Cloud credentials, Azure app registrations), since that is
+where a client id comes from. Sign-in stays disabled until a client id is
+stored; clicking it POSTs `/calendar/oauth/start` and opens the consent URL with
+`window.open(…, 'noopener,noreferrer')` (the Electron shell forwards that to the
+OS browser). The return value is not consulted — with `noopener` the spec
+answers `null` whether or not a tab opened — so the same URL is always offered
+as a link beneath the buttons, and the toast is worded for both outcomes.
+Disconnect sits on the status row beside the badge (the action row stays at
+Save + Sign in) and POSTs `/calendar/credentials/forget`. Failures are shown
+in-page through `ErrorNotice`: a status load that failed with no form on screen
+carries the agent hand-off; a failure beside typed-but-unsaved credential
+values does not, because the hand-off unmounts the form.
+
+The callback the provider redirects to, `GET
+/api/apps/meetings/calendar/oauth/callback`, is exempt from the dashboard's
+token gate (`token_auth.MEETINGS_OAUTH_CALLBACK_PATH`, GET only, on the
+method-scoped `_BYPASS_EXACT_METHODS` map beside the self-authenticating
+webhooks). From the Electron shell the consent runs in the OS browser, which
+holds no dashboard cookie, so on the ordinary gate every desktop sign-in ended
+on a 403 JSON page. The handler's own single-use `state` check is its
+admission, as the route registration already states; the exemption is one path
+and one method, and `test_meetings_oauth_callback_auth.py` pins the spelling to
+the route the app registers and drives the middleware to show the neighbouring
+`/calendar/oauth/start` still needs a token.
+
 ## Transcript UI and speech-to-text
 
 Kiro Crew's own `/api/ws/stt` (`dashboard/stt_stream.py`).
@@ -899,7 +942,10 @@ suite would also be collected by CI; the second root already collects builtin-ap
 suites that intentionally ship beside their code.
 
 Frontend: `website/src/test/MeetingsApiClient.test.ts` (fetch-boundary
-translation), `MeetingsSessionLogic.test.ts` (dedup, preset resolution, the
+translation), `MeetingsCalendarCredentials.test.tsx` (write-only fields, the
+allowlist-shaped form, the badge derived from field names, the OAuth open with
+its always-offered link, the two-button action row, in-page failures),
+`MeetingsSessionLogic.test.ts` (dedup, preset resolution, the
 transition table), `MeetingsPage.test.tsx` and `MeetingsPageCov80.test.tsx` (list,
 refresh, deletion, and calendar rows), `MeetingsSettingsViewCoverage.test.tsx`,
 `MeetingsAgentPillBar.test.tsx`, `MeetingsBroadcastBar.test.tsx`,
