@@ -418,11 +418,10 @@ describe('leaving the meeting view', () => {
     expect((await settledState(exit)).value).toBe(true)
   })
 
-  it('saves the text with an unresolved placeholder removed, rather than nothing', async () => {
-    // An ordinary flush waits for the upload, because the hook will still be here
-    // when it lands. On the way out there is no later, so the words are saved and
-    // the token is not — and it stays in the FIELD, so if the refusal keeps the user
-    // here the upload can still land in its place.
+  it('waits for a pending upload and saves the note with its image in place', async () => {
+    // Leaving unmounts the hook, and an upload that lands after that has nowhere to
+    // insert its image. So exit waits for the upload, and the note it saves carries
+    // the pasted image rather than losing it.
     const upload = deferred<Stored>()
     const { view, save, type, flush } = mount({ uploadImage: vi.fn(() => upload.promise) })
     type('before after')
@@ -433,11 +432,72 @@ describe('leaving the meeting view', () => {
 
     let exit!: Promise<boolean>
     act(() => { exit = view.result.current.exit() })
+    expect(save).not.toHaveBeenCalled()
+    expect((await settledState(exit)).settled).toBe(false)
+    upload.resolve({ alt: '10:23', src: 'images/abc.png' })
+    await act(async () => { await exit })
+    expect(await exit).toBe(true)
     expect(save).toHaveBeenCalledTimes(1)
-    expect(save).toHaveBeenCalledWith('before after')
-    expect((await settledState(exit)).value).toBe(true)
-    expect(view.result.current.draft).toMatch(/\uFDD0\d+\uFDD1/u)
-    expect(view.result.current.uploading).toBe(true)
+    expect(save.mock.calls[0][0]).toContain('![10:23](images/abc.png)')
+    expect(view.result.current.dirty).toBe(false)
+  })
+
+  it('waits for a pasted image on an empty note instead of reading it as saved', async () => {
+    // The empty note is the baseline, so stripping the token would leave text equal
+    // to it and exit would answer true with the screenshot never referenced.
+    const upload = deferred<Stored>()
+    const { view, save } = mount({ uploadImage: vi.fn(() => upload.promise) })
+    act(() => { view.result.current.pasteImage(pngFile(), 0) })
+    let exit!: Promise<boolean>
+    act(() => { exit = view.result.current.exit() })
+    expect((await settledState(exit)).settled).toBe(false)
+    upload.resolve({ alt: '00:05', src: 'images/first.png' })
+    await act(async () => { await exit })
+    expect(await exit).toBe(true)
+    expect(save).toHaveBeenCalledTimes(1)
+    expect(save.mock.calls[0][0]).toContain('![00:05](images/first.png)')
+  })
+
+  it('saves an edit made while its exit save was on the wire before answering', async () => {
+    // The field stays editable during the exit save. An edit made in that window is
+    // newer than the body being awaited, so exit saves it too and answers on THAT.
+    const first = deferred<unknown>()
+    const second = deferred<unknown>()
+    let calls = 0
+    const { view, save, type } = mount({
+      save: () => (++calls === 1 ? first.promise : second.promise),
+    })
+    type('first body')
+    let exit!: Promise<boolean>
+    act(() => { exit = view.result.current.exit() })
+    expect(save).toHaveBeenCalledTimes(1)
+    type('first body, then more')
+    first.resolve({})
+    expect((await settledState(exit)).settled).toBe(false)
+    expect(save).toHaveBeenCalledTimes(2)
+    expect(save).toHaveBeenLastCalledWith('first body, then more')
+    second.resolve({})
+    await act(async () => { await exit })
+    expect(await exit).toBe(true)
+    expect(view.result.current.dirty).toBe(false)
+  })
+
+  it('answers false when the edit made during the exit save is refused', async () => {
+    let calls = 0
+    const first = deferred<unknown>()
+    const { view, type } = mount({
+      save: () => (++calls === 1 ? first.promise : Promise.reject(new Error('too large'))),
+    })
+    type('accepted body')
+    let exit!: Promise<boolean>
+    act(() => { exit = view.result.current.exit() })
+    type('refused newer body')
+    first.resolve({})
+    await act(async () => { await exit.catch(() => false) })
+    expect(await exit).toBe(false)
+    expect(view.result.current.draft).toBe('refused newer body')
+    expect(view.result.current.dirty).toBe(true)
+    expect(view.result.current.saveFailed).toBe(true)
   })
 
   it('does the same on unmount, the exit that cannot wait', () => {
@@ -659,10 +719,12 @@ describe('pasting an image', () => {
     let exit: Promise<boolean> = Promise.resolve(false)
     act(() => { exit = view.result.current.exit() })
     await settle()
+    // Exit waits for the upload; once it settles the save carries no delimiter.
+    pending.resolve({ alt: 'late', src: 'images/late.png' })
+    await settle()
     expect(await exit).toBe(true)
     expect(save).toHaveBeenCalledTimes(1)
     expect(save.mock.calls[0][0]).not.toMatch(/[\uFDD0\uFDD1]/u)
-    pending.resolve({ alt: 'late', src: 'images/late.png' })
     await settle()
     act(() => { vi.advanceTimersByTime(1000) })
     for (const [body] of save.mock.calls) expect(body).not.toMatch(/[\uFDD0\uFDD1]/u)

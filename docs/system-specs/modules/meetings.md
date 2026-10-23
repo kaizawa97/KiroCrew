@@ -554,7 +554,11 @@ The hook owns the debounce, the flush, the acknowledged-server-content baseline
 (advanced when a save LANDS, not when it is sent, so a stale response can never
 replace newer typing and a refused save stays dirty until one succeeds), and the
 pending image paste, whose markdown is inserted and saved when the upload resolves
-even if the panel has since closed. Every failure the user can act on — a refused
+even if the panel has since closed. Leaving the meeting view goes through `exit`,
+which waits for every pending upload (each bounded by the client's upload deadline)
+and then saves until the CURRENT draft is acknowledged, so a screenshot pasted just
+before Back, or an edit typed while the exit save was on the wire, is on disk before
+the view navigates; a refusal keeps the user in the view. Every failure the user can act on — a refused
 save, a refused load (`note_unreadable`, mapped to a catalog string by code), a
 refused paste — renders in the panel through `ErrorNotice`, not only in the
 notification feed.

@@ -25,7 +25,9 @@
 //   the panel and the debounce all retry it.
 // * Every pasted image reserves its position with a unique placeholder. Uploads may
 //   resolve in any order; each result replaces only its own token, and no save ever
-//   carries a token: a flush waits while an upload is pending, and the exit flush
+//   carries a token: a flush waits while an upload is pending, `exit` waits for the
+//   upload to settle (each one is bounded by the client's upload deadline) so the
+//   image is in the note it saves, and only the unload flush, which cannot wait,
 //   saves the text with any unresolved token removed.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
@@ -71,9 +73,11 @@ function stripImagePlaceholders(text: string): string {
 
 /**
  * Which trigger a flush serves. `normal` is blur, preview, close and the debounce;
- * it holds back while an upload is pending. `exit` leaves the meeting view and
- * saves with any unresolved token removed. `unload` is the document going away
- * (reload, tab close): like `exit`, but it cannot wait for anything to settle.
+ * it holds back while an upload is pending. `exit` leaves the meeting view; the
+ * `exit` callback has already waited for uploads, so it saves the draft and
+ * waits on a save still in flight. `unload` is the document going away (reload,
+ * tab close): it cannot wait for anything, so it sends the newest text at once
+ * with any unresolved token removed.
  */
 type FlushMode = 'normal' | 'exit' | 'unload'
 
@@ -112,10 +116,11 @@ export interface NoteDraft {
   /** Save now if anything is unsaved. Blur, the preview toggle and closing the panel. */
   flush: () => void
   /**
-   * The save that precedes leaving the meeting view. Unlike `flush` it does not
-   * wait for a pending upload — the text is saved with the unresolved placeholder
-   * removed — and it resolves once the outcome is known: `true` when the note is on
-   * disk (or there was nothing to save), `false` when the save was refused, in
+   * The save that precedes leaving the meeting view. It first waits for every
+   * pending upload to settle, so a pasted image is in the note it saves, then saves
+   * until the CURRENT draft is acknowledged: an edit made while an earlier save was
+   * on the wire is saved too before it answers. It resolves `true` when the note is
+   * on disk (or there was nothing to save), `false` when a save was refused, in
    * which case the draft is still here, dirty, with `saveFailed` set.
    */
   exit: () => Promise<boolean>
@@ -174,6 +179,10 @@ export function useNoteDraft({
   // purpose: an upload belongs to the hook that started it, and the hook lives as
   // long as the meeting view.
   const pendingTokensRef = useRef(new Set<string>())
+  // The same uploads as promises that settle once their result is in the draft, so
+  // `exit` can wait for them. Each request is aborted at the client's upload
+  // deadline, so the wait is bounded.
+  const uploadsRef = useRef(new Set<Promise<void>>())
 
   const clearTimer = () => {
     if (timerRef.current) {
@@ -192,6 +201,7 @@ export function useNoteDraft({
       sendSeqRef.current = 0
       ackedSeqRef.current = 0
       pendingTokensRef.current.clear()
+      uploadsRef.current.clear()
       setPendingSaves(0)
       setPendingUploads(0)
       setSaveFailed(false)
@@ -250,12 +260,12 @@ export function useNoteDraft({
    * One flush. Resolves with whether the note is on disk afterwards: `true` when
    * the save landed or nothing needed saving, `false` when it was refused.
    *
-   * `leaving` is the exit flush. A pending upload holds an ordinary flush back —
-   * its placeholder must not reach disk, and the upload is about to resolve into a
-   * hook that is still here — but on the way out of the meeting view there is no
-   * "later", so the text is saved with the unresolved token removed instead of not
-   * at all. The token stays in the FIELD in that case: a refusal keeps the user
-   * here, and the upload may yet land in its place.
+   * A pending upload holds an ordinary flush back: its placeholder must not reach
+   * disk, and the upload is about to resolve into a hook that is still here. `exit`
+   * waits for uploads before it calls this, so only `unload`, which has no "later",
+   * normally reaches it with one pending; the text is then saved with the
+   * unresolved token removed instead of not at all. The token stays in the FIELD
+   * in that case, so the upload may yet land in its place.
    */
   const flushImpl = useCallback((mode: FlushMode): Promise<boolean> => {
     clearTimer()
@@ -283,7 +293,30 @@ export function useNoteDraft({
   }, [send])
 
   const flush = useCallback(() => { void flushImpl('normal') }, [flushImpl])
-  const exit = useCallback(() => flushImpl('exit'), [flushImpl])
+
+  // Leaving the meeting view unmounts this hook, and an upload that lands after
+  // that has nowhere to insert its image. So `exit` waits for every pending upload
+  // first, and then saves until the draft it is about to leave is the one the
+  // server acknowledged: the field stays editable while a save is on the wire, and
+  // an edit made in that window would otherwise be left to the unmount flush,
+  // which nobody awaits. Every pass either answers or waits on the network, so
+  // the loop never spins; it ends on the first refusal.
+  const exit = useCallback(async (): Promise<boolean> => {
+    const exitMeetingId = meetingIdRef.current
+    for (;;) {
+      if (meetingIdRef.current !== exitMeetingId) return true
+      const uploads = [...uploadsRef.current]
+      if (uploads.length > 0) {
+        await Promise.allSettled(uploads)
+        continue
+      }
+      if (!(await flushImpl('exit'))) return false
+      if (meetingIdRef.current !== exitMeetingId) return true
+      if (loadFailedRef.current || baselineRef.current === null) return true
+      if (uploadsRef.current.size > 0) continue
+      if (stripImagePlaceholders(draftRef.current) === baselineRef.current) return true
+    }
+  }, [flushImpl])
 
   const change = useCallback((value: string) => {
     setDraft(value)
@@ -320,7 +353,8 @@ export function useNoteDraft({
       if (error) setUploadError(error)
       setPendingUploads(n => n - 1)
     }
-    void (async () => {
+    const uploads = uploadsRef.current
+    const upload = (async () => {
       try {
         const stored = await uploadRef.current(file)
         finish(imageSnippet(stored.alt, stored.src), null)
@@ -329,6 +363,8 @@ export function useNoteDraft({
         finish(null, tooLarge ? 'tooLarge' : 'failed')
       }
     })()
+    uploads.add(upload)
+    void upload.finally(() => { uploads.delete(upload) })
   }, [change])
 
   // Unmounting is the last exit, and it saves too. The meeting view calls `exit`
@@ -351,12 +387,14 @@ export function useNoteDraft({
   // have saved newer text. The mutation's scope queues it behind that in-flight save.
   useEffect(() => {
     const tokens = pendingTokensRef.current
+    const uploads = uploadsRef.current
     const timer = timerRef
     return () => {
       void flushImplRef.current('unload')
       if (timer.current) clearTimeout(timer.current)
       timer.current = null
       tokens.clear()
+      uploads.clear()
     }
   }, [])
 
